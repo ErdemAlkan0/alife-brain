@@ -1,0 +1,7 @@
+name=A-Life Brain
+id=ALifeBrain
+author=ERDEM
+description=LLM dialogue, long-term memory and RL decisions for Project A-Life NPCs. Needs the A-Life Brain sidecar; without it A-Life behaves normally.
+require=\ProjectALifeNPCs
+modversion=0.1.0
+versionMin=42.21.0

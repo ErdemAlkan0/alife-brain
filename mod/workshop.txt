@@ -1,0 +1,5 @@
+version=1
+title=A-Life Brain
+description=LLM dialogue, long-term memory and RL decisions for Project A-Life NPCs.
+tags=Build 42
+visibility=private
