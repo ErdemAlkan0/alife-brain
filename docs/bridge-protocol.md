@@ -32,8 +32,65 @@ Bütün satırlar **ASCII** JSON'dur (ASCII dışı karakterler `\uXXXX`), bu y�
 - `ts`: Lua'nın `getTimestampMs()` değeri (duvar saati, ms).
 - `ack` (isteğe bağlı): Lua'nın o sidecar örneğinden (`sid`) işlediği en büyük `rseq`. Her mesaja eklenir; gönderilecek
   başka bir şey yoksa en fazla saniyede bir ayrı bir `ack` mesajı gider.
-- `type` değerleri (v1): `hello`, `ping`, `event`, `ack`. `event` ve `ack` için cevap satırı yazılmaz
+- `type` değerleri (v1): `hello`, `ping`, `event`, `dialogue`, `ack`. `event` ve `ack` için cevap satırı yazılmaz
   (`event` hatalıysa yazılır).
+- `hello` cevabı `features` listesi döner (`ping`, `event`, sağlayıcı ve hafıza hazırsa `dialogue`); Lua diyalog
+  kancasını yalnızca `dialogue` varsa kullanır.
+
+### `dialogue` (2. aşama)
+
+İstek `data` (Lua `Hooks.dialogueContext` + `Dialogue.handle`):
+
+```json
+{"text": "Su var mı?", "stance": "neutral",
+ "npc": {"uid": "palife:...", "name": "...", "factionId": "...", "factionName": "...", "groupId": "...",
+         "roleLabel": "Militia - Rifleman", "temperament": "seasoned", "sex": "m", "behaviorState": "idle", "wounds": 0},
+ "player": {"key": "sp:0", "weapon": "hammer"},
+ "facts": {"player_armed": true, "recent_zombie_contact": true},
+ "world": {"town": "Muldraugh", "hour": 14, "day": 2}}
+```
+
+İstekte ayrıca `npc.inventory` (`{"water": 1, "food": 0, "medicine": 2}`, A-Life'ın verilebilir eşya kurallarıyla
+sayılır) ve `npc.following` (NPC şu an bu oyuncuyu takip ediyor mu) gelir.
+
+Cevap `data`: `{"say": "...", "intent": "none|give|follow|stay|leave|trade|warn|attack|rob|give_info",
+"item": "water|food|medicine|null", "trustDelta": 0, "fearDelta": 0, "trust": 0, "fear": 0}`. `item` yalnızca
+`give` ile gelir.
+
+#### Takas alanları
+
+İstekte `npc.tradeable` (`[{"name": "Konserve Fasulye", "count": 2}]`, NPC'nin elde/üstte/takılı olmayan, anahtar ya da
+içi dolu çanta olmayan eşyaları, en çok 30 tür) ve masada bir şey varsa `trade`:
+`{"playerOffer": [{"name", "count"}], "npcSide": [{"name", "count"}]}` (oyuncunun koyduğu / NPC'den istediği).
+Sohbet penceresi açıkken istekte ayrıca `player.tradeable` (oyuncunun takas edebileceği eşyalar, aynı biçim) gelir;
+NPC bunlardan isteyebilir.
+Cevapta `trade`: `null` ya da `{"decision": "accept|reject|counter", "npcOffer": ["..."], "npcWants": ["..."]}`.
+`accept` masadaki değişimi şimdi yaptırır; `counter` NPC'nin kendi eşyalarını (yalnızca `tradeable` adları) masaya
+koyar ve `npcWants` (yalnızca `player.tradeable` adları) varsa oyuncunun tarafını tam olarak bunlarla doldurur
+(eşyalar yine oyuncuda kalır); oyuncu "Kabul et" ile yeni bir LLM çağrısı olmadan alabilir.
+
+**Veresiye yok:** değişimi her zaman oyun yapar (`Hooks.executeTrade`): önce her iki tarafın eşyaları yeniden
+doğrulanır; NPC bir şey veriyorsa oyuncunun tarafı boş olamaz (`unpaid`); önce oyuncunun eşyaları taşınır, sonra
+NPC'ninkiler; bir eşya taşınamazsa bütün taşımalar geri alınır. Oyuncu beklerken masayı değiştirdiyse kabul
+geçersizdir. Sidecar ayrıca pazarlığın parçası olan bir `give`'i (oyuncunun ya da NPC'nin sözünde "karşılığında",
+"takas", oyuncunun sözünde "veririm", "I'll pay" vb.) takas önerisine çevirir: NPC'nin eşyası masaya konur, oyuncunun
+adını andığı eşyası istenir.
+
+### `history`
+
+İstek `data`: `{"uid": "...", "playerKey": "sp:0", "limit": 30}`. Cevap: `{"uid", "name", "trust", "fear",
+"turns": [{"speaker": "player|npc|system", "text": "...", "ts": 0}]}` (eskiden yeniye). `system` satırları oyunda
+gerçekte olanlardır (ör. "Henry handed over Water Bottle.").
+
+### `event` türleri
+
+`npc_hit`, `npc_died` (EventLog.lua) ve `npc_action` (Dialogue.lua): `{"kind": "npc_action", "action":
+"give|follow|stay|leave|trade", "ok": true, "item": "water", "label": "Water Bottle", "given": ["..."] (NPC'den
+oyuncuya), "received": ["..."] (oyuncudan NPC'ye), "reason": "no_item|too_far|limit|low_trust|refused|rejected|
+changed|empty|unpaid", "npc": {...}, "by": {"kind": "player", "key": "sp:0"}}`. `trust`/`fear` NPC'nin o oyuncuya karşı birikmiş değeridir (-100..100).
+Hata kodları: `dialogue_unavailable`, `invalid_llm_reply`, sağlayıcı kodları (`timeout`, `rate_limited`,
+`unreachable`, `unauthorized`, `player2_client_id_missing` ...). LLM çağrısı sidecar'da arka planda çalışır;
+Lua 35 s bekler (Player2 ücretsiz modeli ölçümde 10–17 s sürdü; sidecar 30 s sonra vazgeçer), sonra A-Life'ın hazır repliğine düşer.
 
 ## Sidecar → Lua (cevap dosyası)
 

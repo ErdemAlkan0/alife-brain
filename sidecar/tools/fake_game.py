@@ -25,6 +25,7 @@ class FakeGame:
         self.seq = 0
         self.last_rseq = 0
         self.sid: str | None = None
+        self.features: set[str] = set()
 
     def now(self) -> int:
         return int(time.time() * 1000)
@@ -91,11 +92,21 @@ def main() -> int:
 
     reply, ms = game.call("hello", {"mod": "ALifeBrain", "modVersion": "fake", "game": "fake"})
     print(f"hello -> ok={reply['ok']} data={reply.get('data')} ({ms:.0f} ms)")
+    game.features = set((reply.get("data") or {}).get("features") or [])
     for index in range(args.pings):
         reply, ms = game.call("ping", {"sentAt": game.now(), "text": "Merhaba, çay içer misin? Şeker yok."})
         print(f"ping {index + 1} -> echo={reply['data']['echo']['text']!r} ({ms:.0f} ms)")
 
     game.send("event", {"kind": "npc_hit", "npc": {"uid": "palife:smoke:1"}, "by": {"kind": "player", "key": "sp:0"}})
+    if "dialogue" in game.features:
+        reply, ms = game.call("dialogue", {
+            "text": "Merhaba, su var mı?",
+            "player": {"key": "sp:0"},
+            "npc": {"uid": "palife:smoke:1", "name": "Smoke Tester", "factionName": "Test Crew"},
+            "stance": "neutral",
+        }, timeout_s=20)
+        print(f"dialogue -> ok={reply['ok']} say={reply.get('data', {}).get('say')!r} "
+              f"error={reply.get('error')} ({ms:.0f} ms)")
     reply, _ = game.call("teleport")
     print(f"unknown type -> ok={reply['ok']} error={reply.get('error')}")
 

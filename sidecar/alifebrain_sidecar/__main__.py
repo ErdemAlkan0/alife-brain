@@ -7,12 +7,16 @@ import logging
 import os
 import sys
 import time
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from . import __version__
 from .app import Sidecar
+from .config import PROVIDERS, load_settings
 from .events import EventStore
 from .files import FileBridge
+from .llm import LLMError, build_provider
+from .memory import MemoryStore
 
 log = logging.getLogger("alifebrain_sidecar")
 
@@ -64,6 +68,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                         help="Project Zomboid Lua folder (default: %(default)s)")
     parser.add_argument("--data-dir", type=Path, default=default_data_dir(),
                         help="where events and memory are stored (default: %(default)s)")
+    parser.add_argument("--provider", choices=PROVIDERS,
+                        help="override the provider from config.json (fake = canned replies, no LLM)")
     parser.add_argument("--interval", type=float, default=0.05, help="seconds between steps")
     parser.add_argument("-v", "--verbose", action="store_true")
     parser.add_argument("--version", action="version", version=__version__)
@@ -79,14 +85,41 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     with SingleInstance(args.data_dir / "sidecar.lock"):
-        sidecar = Sidecar(FileBridge(args.lua_dir), EventStore(args.data_dir / "events.jsonl"))
-        log.info("sidecar %s sid=%s watching %s, data in %s", __version__, sidecar.sid, args.lua_dir, args.data_dir)
+        # Same log in a file, so a session can be inspected after the console window is closed.
+        file_log = RotatingFileHandler(args.data_dir / "sidecar.log", maxBytes=2_000_000, backupCount=3,
+                                       encoding="utf-8")
+        file_log.setLevel(logging.DEBUG if args.verbose else logging.INFO)
+        file_log.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+        logging.getLogger().addHandler(file_log)
+        config_path = args.data_dir / "config.json"
+        settings = load_settings(config_path)
+        if args.provider:
+            settings.provider = args.provider
+        provider = None
+        try:
+            provider = build_provider(settings)
+        except LLMError as error:
+            log.error("LLM provider %s unavailable (%s); dialogue disabled, A-Life lines are used", settings.provider,
+                      error)
+        if settings.provider == "player2" and not settings.player2.client_id:
+            log.warning("Player2 client id missing: create one at https://player2.game/profile/developer and put it "
+                        "in %s (player2.client_id) or ALIFEBRAIN_PLAYER2_CLIENT_ID", config_path)
+
+        memory = MemoryStore(args.data_dir / "memory.sqlite3")
+        sidecar = Sidecar(FileBridge(args.lua_dir), EventStore(args.data_dir / "events.jsonl"), memory=memory,
+                          provider=provider, dialogue=settings.dialogue,
+                          health_interval_ms=settings.player2.health_interval_s * 1000)
+        log.info("sidecar %s sid=%s provider=%s watching %s, data in %s", __version__, sidecar.sid,
+                 settings.provider, args.lua_dir, args.data_dir)
         try:
             while True:
                 sidecar.step()
                 time.sleep(args.interval)
         except KeyboardInterrupt:
             log.info("stopped; stats=%s", sidecar.stats)
+        finally:
+            sidecar.close()
+            memory.close()
     return 0
 
 

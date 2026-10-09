@@ -6,6 +6,8 @@ require "ALifeBrain/Json"
 require "ALifeBrain/Bridge"
 require "ALifeBrain/ALifeBrainHooks"
 require "ALifeBrain/EventLog"
+require "ALifeBrain/Dialogue"
+require "ALifeBrain/ChatWindow"
 require "ALifeBrain/Tests/AllTests"
 
 ALifeBrain = ALifeBrain or {}
@@ -43,7 +45,11 @@ function Main.hello()
     local bridge = ALifeBrain.bridge
     bridge:request("hello", bridge.meta, function(ok, data)
         if ok and type(data) == "table" then
-            log("sidecar ready: version=" .. tostring(data.version) .. " features=" .. tostring(Json.encode(data.features)))
+            local features = {}
+            for _, name in ipairs(type(data.features) == "table" and data.features or {}) do features[name] = true end
+            bridge.features = features
+            log("sidecar ready: version=" .. tostring(data.version) .. " provider=" .. tostring(data.provider)
+                .. " features=" .. tostring(Json.encode(data.features)))
         else
             log("hello failed: " .. tostring(data))
         end
@@ -75,6 +81,7 @@ function Main.onStatusChange(online, sidecar)
         Main.hello()
         Main.ping()
     else
+        ALifeBrain.bridge.features = nil
         log("sidecar offline; A-Life keeps running on its own")
         halo("A-Life Brain: sidecar offline", 255, 170, 90)
     end
@@ -84,6 +91,7 @@ function Main.onTick()
     local bridge = ALifeBrain.bridge
     if bridge == nil then return end
     bridge:tick()
+    ALifeBrain.Dialogue.tick(nowMs())
     if bridge:isOnline() and nowMs() - Main.lastPingAtMs >= Main.settings.pingIntervalMs then
         Main.ping()
     end
@@ -114,6 +122,17 @@ function Main.onGameStart()
     })
     ALifeBrain.bridge = bridge
     log("bridge started session=" .. tostring(bridge.sessionId) .. "; waiting for sidecar")
+
+    -- A-Life answers talk on the server; in single player that is this Lua state. Multiplayer
+    -- clients need a client-side path (CLAUDE.md), so the hook is single player only for now.
+    if type(isClient) == "function" and isClient() then
+        log("multiplayer client: LLM dialogue not available yet; A-Life lines are used")
+    else
+        local installed, reason = Hooks.installTalkHook(ALifeBrain.Dialogue.handle)
+        log("LLM dialogue hook " .. (installed and "ready" or "not installed") .. " (" .. tostring(reason) .. ")")
+        local keyed, keyReason = Hooks.wrapTalkInput(ALifeBrain.Chat.openFromKey)
+        log("chat key opens the conversation window: " .. tostring(keyed) .. " (" .. tostring(keyReason) .. ")")
+    end
 end
 
 function ALifeBrain.status()
@@ -125,16 +144,22 @@ function ALifeBrain.status()
     local status = bridge:status()
     status.lastRttMs = Main.lastRttMs
     status.events = ALifeBrain.EventLog and ALifeBrain.EventLog.metrics or nil
+    status.features = bridge.features
+    status.dialogue = ALifeBrain.Dialogue.metrics
+    status.dialogueLastError = ALifeBrain.Dialogue.lastError
     log(tostring(Json.encode(status)))
     return status
 end
 
 function ALifeBrain.ping() return Main.ping() end
 
--- Debug console: ALifeBrain.spawnTestNpc() or ALifeBrain.spawnTestNpc(3, "scavenger_crew")
-function ALifeBrain.spawnTestNpc(count, encounterId)
-    local ok, reason = Hooks.spawnTestNpc(getPlayer(), encounterId or "patrol", count or 1)
-    log(ok and "spawn requested; A-Life answers in its own log" or ("spawn failed: " .. tostring(reason)))
+-- Debug console: ALifeBrain.spawnTestNpc() spawns one friendly NPC (Church Volunteers) to talk to;
+-- ALifeBrain.spawnTestNpc("alife_hobbs", 3) spawns three Hobbs Brothers (hostile).
+function ALifeBrain.spawnTestNpc(factionId, count, encounterId)
+    local faction = factionId or "alife_church_volunteers"
+    local ok, reason = Hooks.spawnTestNpc(getPlayer(), encounterId or "patrol", count or 1, 6, faction)
+    log(ok and ("spawn requested (" .. faction .. "); A-Life answers in its own log")
+        or ("spawn failed: " .. tostring(reason)))
     return ok
 end
 

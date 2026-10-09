@@ -143,6 +143,21 @@ düşman olmayan durumlarda araya gir:
 - Cevap gelince `Speech.say(shell, reply, { face = player })`; zaman aşımında orijinal `Talk.respond` çağrılır
   (hazır replik geri dönüşü).
 - Bu bir fonksiyon sarmalaması (wrap); `ALifeBrainHooks.lua` içinde tutulacak ve orijinal referans saklanacak.
+- **Uygulandı (2. aşama):** `Hooks.installTalkHook(Dialogue.handle)`; orijinal `Hooks.originalRespond` içinde,
+  geri düşüş `Hooks.respondWithAlife`. Yalnızca tek oyunculu (MP istemcisinde `Talk` tablosu yok).
+- **Araya giren replikler:** `server/.../Behaviours/ALifeModuleTalkPresence.lua` `evaluate`, `memory.talkHoldUntilMs`
+  geçerliyken NPC'yi `talk_hold` durumunda tutar (susar, oyuncuya döner). Tutma bitince oyuncu 5 kare içindeyse
+  `GREET_PLAYER`, 2,5 kare içinde 20 s'den uzun kalırsa `STARE_PLAYER` der; sayaçlar `Presence.greeted[party]` /
+  `Presence.stared[party]`, `party = Presence.partyKey(actor, playerKey)`. Bizim çözüm: pencere açıkken her 2 s
+  `Talk.hold`; kapanınca `Hooks.release` (`Talk.writeMemory` ile tutmayı bırakır) + `Hooks.quietPresence` (iki
+  sayacı 3 dk ileri alır).
+- **Eşya verme:** `server/.../Talk/ALifeTalkSupplies.lua` `Supplies.matches(item, "ASK_WATER"|"ASK_FOOD"|"ASK_MEDS")`
+  A-Life'ın verilebilir eşya kuralları (içilebilir su, bozuk/zehirli olmayan yiyecek, ilk yardım; kuşanılmış değil).
+  Aktarım `shell:getInventory():Remove(item)` + `player:getInventory():AddItem(item)`, MP sunucuda
+  `sendRemoveItemFromContainer` / `sendAddItemToContainer` (Supplies.respond ile aynı).
+- **Takip / bekleme:** `DecisionLoop.setOrder(uid, generation, { kind = "follow", player, untilMs })` ve
+  `{ kind = "hold", anchor, untilMs }`; `orders` modülü (öncelik 10) uygular, tehdit tepkileri yine önce gelir.
+  Etkin emir: `DecisionLoop.orders[uid]`.
 
 Prompt için hazır bağlam:
 - `Speech.contextFor(record, player)` → `role, register, temperament, sex, day, hour, voice, stance`.
@@ -218,7 +233,14 @@ A-Life'ta genel bir olay yolu yok; `Telemetry.emit` çok az kategoriye sahip (`a
 - Encounter kimlikleri `shared/.../World/ALifeEncounters.lua`: `patrol` (2–4), `raid` (Hostile Scouts),
   `scavenger_crew`, `town_patrol`, `blockade` ... `fullscale_raid` tam ölçekli baskın başlatır, testte kullanma.
   Spawn edilenler `Service.hostileProfileIds` ile seçilir, yani oyuncuya düşman olabilirler.
-- Bizim kısayol: `ALifeBrain.spawnTestNpc(count, encounterId)` → `Hooks.spawnTestNpc`.
+- `factionId` verilirse o fraksiyondan seçer (`Service.hostileProfileIds(count, seed, factionId, true)`).
+  Oyuncuya bakış `common/alife_runtime/catalog/faction_registry.alife` içindeki `stance.player`: ör. dost/barışçıl
+  `alife_church_volunteers`, `alife_county_ems`, `alife_lone_nurse`; düşman `alife_hobbs`, `alife_pit`.
+- Bizim kısayol: `ALifeBrain.spawnTestNpc(factionId, count, encounterId)` → `Hooks.spawnTestNpc`
+  (varsayılan `alife_church_volunteers`, 1 NPC, `patrol`).
+- Gözlem (A-Life'a bildirilebilir): `hostileProfileIds` içindeki `seed % 2147483647` milisaniye zaman damgasıyla
+  çağrılıyor; Kahlua'nın `%` hatası yüzünden (bkz. CLAUDE.md) sonuç beklenenden farklı olabilir. Zararı muhtemelen
+  yalnızca profil seçiminin rastgeleliği.
 
 ## 10. Kırılganlık listesi (A-Life güncellenince kontrol et)
 
