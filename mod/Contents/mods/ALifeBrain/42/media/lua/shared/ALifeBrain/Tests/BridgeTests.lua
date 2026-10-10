@@ -147,6 +147,28 @@ ALifeBrain.Tests.suite("Bridge", {
         check.same(got, { ok = false, data = "offline" })
     end },
 
+    { "rides out a response file it cannot read for a moment", function(check)
+        local env = harness()
+        online(env)
+        local got = nil
+        env.bridge:request("ping", {}, function(ok, data) got = { ok = ok, data = data } end, 60000)
+        local good = env.files[Bridge.RES_FILE]
+        env.files[Bridge.RES_FILE] = nil -- locked while the sidecar swaps it in
+        env.advance(300)
+        env.files[Bridge.RES_FILE] = { "{\"v\":1,\"type\":\"sta" } -- or caught half-read
+        env.advance(300)
+        check.equal(env.bridge:isOnline(), true, "still online")
+        check.isNil(got, "the pending request lives on")
+        env.files[Bridge.RES_FILE] = good
+        env.publish(nil)
+        env.advance(300)
+        check.equal(env.bridge:isOnline(), true)
+        env.files[Bridge.RES_FILE] = nil
+        env.advance(Bridge.defaults.aliveTimeoutMs + 1)
+        check.equal(env.bridge:isOnline(), false, "gone for longer than the alive timeout")
+        check.same(got, { ok = false, data = "offline" })
+    end },
+
     { "treats a changing beat as alive even with a skewed clock", function(check)
         local env = harness()
         env.publish(nil, { ts = 1 })

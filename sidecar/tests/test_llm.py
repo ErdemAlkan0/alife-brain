@@ -37,6 +37,10 @@ class FakeApi(BaseHTTPRequestHandler):
         FakeApi.seen.append(("POST", self.path, self.lower_headers(), body))
         if FakeApi.mode == "rate_limited":
             return self._send(429, {"error": "slow down"})
+        if FakeApi.mode in ("reject_once", "reject_always"):
+            if FakeApi.mode == "reject_once":
+                FakeApi.mode = "ok"
+            return self._send(400, {"message": "user input rejected (HTTP 400): API returned unexpected status code"})
         if FakeApi.mode == "garbage":
             return self._send(200, b"<html>")
         if FakeApi.mode == "slow":
@@ -101,6 +105,17 @@ class ProviderTests(unittest.TestCase):
             with self.subTest(mode=mode), self.assertRaises(LLMError) as caught:
                 self.chat(provider)
             self.assertEqual(caught.exception.code, code)
+
+    def test_player2_retries_a_quick_rejection_once(self):
+        provider = Player2Provider(self.url, "id")
+        FakeApi.mode = "reject_once"
+        self.assertEqual(self.chat(provider), '{"say": "Hi."}')
+        self.assertEqual(len([entry for entry in FakeApi.seen if entry[0] == "POST"]), 2)
+        FakeApi.mode, FakeApi.seen = "reject_always", []
+        with self.assertRaises(LLMError) as caught:
+            self.chat(provider)
+        self.assertEqual(caught.exception.code, "http_400")
+        self.assertEqual(len(FakeApi.seen), 2, "only one retry")
 
     def test_timeout(self):
         FakeApi.mode = "slow"

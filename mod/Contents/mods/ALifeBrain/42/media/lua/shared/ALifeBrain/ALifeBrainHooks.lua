@@ -1,7 +1,11 @@
 -- Every touchpoint with Project A-Life lives in this file, so an A-Life update can be
 -- repaired in one place. Findings behind each touchpoint: docs/alife-hooks.md
 --
--- Phase 1 only reads A-Life state; nothing here patches A-Life functions yet.
+-- Wrapped A-Life functions (originals kept, every wrapper falls back to them):
+-- Talk.respond (LLM dialogue), TalkInput.open (chat window) and ModuleRegistry.evaluate
+-- (watches decisions for behavior cloning; never changes them), Stealth.stanceActive
+-- (followers sneak with the player). Registered through A-Life's own module API: three
+-- response modules (Hooks.MODULES: parley, standoff, companion).
 
 ALifeBrain = ALifeBrain or {}
 
@@ -16,6 +20,21 @@ ALifeBrain.Hooks = Hooks
 Hooks.touchpoints = {
     { path = "ModuleRegistry.register", side = "shared" },
     { path = "ModuleRegistry.evaluate", side = "shared" },
+    { path = "ModuleRegistry.allows", side = "shared" },
+    { path = "ModuleRegistry.order", side = "shared", kind = "table" },
+    { path = "ActorRegistry.peek", side = "server" },
+    { path = "ActorRegistry.each", side = "server" },
+    { path = "DecisionLoop.followTarget", side = "server" },
+    { path = "DecisionLoop.refreshDirective", side = "server" },
+    { path = "Stealth.stanceActive", side = "server" },
+    { path = "Survival.healthRatio", side = "server" },
+    { path = "Survival.retreatTarget", side = "server" },
+    { path = "Perception.retaliationTarget", side = "server" },
+    { path = "Perception.ignore", side = "server" },
+    { path = "Reputation.recordedStatus", side = "server" },
+    { path = "Voice.play", side = "server" },
+    { path = "AIFence.faceAimPoint", side = "shared" },
+    { path = "Animations.apply", side = "shared" },
     { path = "BehaviorProfiles.definitions", side = "shared", kind = "table" },
     { path = "Speech.say", side = "shared" },
     { path = "Speech.contextFor", side = "shared" },
@@ -719,4 +738,575 @@ function Hooks.isPlayer(object)
     return ok and result == true
 end
 
+-- Decisions (phase 3: behavior cloning) --------------------------------------------
+-- ModuleRegistry.evaluate runs A-Life's module chains ("decision" when nothing threatens
+-- the NPC, "response" to a threat) and returns the winning state and module id; the
+-- decision loop keeps only the state. The tap sees every full-chain run (not the
+-- single-module "only" calls the loop makes during lulls) and only watches: whatever
+-- A-Life chose is returned unchanged. A nil winner means A-Life's own fallback ran.
+
+Hooks.DECISION_KINDS = { decision = true, response = true }
+
+-- onDecision(kind, actor, shell, context, moduleId | nil)
+function Hooks.installDecisionTap(onDecision)
+    local registry = Hooks.available() and ProjectALife.ModuleRegistry or nil
+    if registry == nil or type(registry.evaluate) ~= "function" then return false, "module_registry_unavailable" end
+    Hooks.decisionTap = onDecision
+    if Hooks.originalEvaluate ~= nil then return true, "already_installed" end
+    local original = registry.evaluate
+    Hooks.originalEvaluate = original
+    registry.evaluate = function(kind, actor, shell, context, only)
+        local result, moduleId = original(kind, actor, shell, context, only)
+        if only == nil and Hooks.DECISION_KINDS[kind] and type(Hooks.decisionTap) == "function" then
+            local ok, failure = pcall(Hooks.decisionTap, kind, actor, shell, context, result ~= nil and moduleId or nil)
+            if not ok then Hooks.decisionTapError = tostring(failure) end
+        end
+        return result, moduleId
+    end
+    return true, "installed"
+end
+
+-- The modules of that chain this NPC may run (its behavior profile, conduct, switches).
+function Hooks.allowedModules(kind, actor)
+    local allowed = ALifeBrain.Json ~= nil and ALifeBrain.Json.array({}) or {}
+    local registry = Hooks.available() and ProjectALife.ModuleRegistry or nil
+    if registry == nil or type(registry.order) ~= "table" or type(registry.allows) ~= "function" then return allowed end
+    for _, module in ipairs(registry.order) do
+        if type(module) == "table" and module.dispatch == kind then
+            local ok, yes = pcall(registry.allows, actor, module.id)
+            if ok and yes == true then allowed[#allowed + 1] = tostring(module.id) end
+        end
+    end
+    return allowed
+end
+
+local function xyzOf(object)
+    local x, y, z = nil, nil, nil
+    pcall(function() x, y, z = object:getX(), object:getY(), object:getZ() end)
+    return x, y, z
+end
+
+local function flatDistance(ax, ay, bx, by)
+    local dx, dy = ax - bx, ay - by
+    return math.sqrt(dx * dx + dy * dy)
+end
+
+local function armed(player)
+    local yes = false
+    pcall(function()
+        local item = player:getPrimaryHandItem()
+        yes = item ~= nil and instanceof(item, "HandWeapon") and tostring(item:getType()) ~= "BareHands"
+    end)
+    return yes
+end
+
+local function nearestPlayer(x, y)
+    local best, bestDistance = nil, nil
+    if x == nil or type(getNumActivePlayers) ~= "function" then return nil end
+    for index = 0, getNumActivePlayers() - 1 do
+        local player = getSpecificPlayer(index)
+        if player ~= nil and not player:isDead() then
+            local px, py = xyzOf(player)
+            if px ~= nil then
+                local distance = flatDistance(x, y, px, py)
+                if bestDistance == nil or distance < bestDistance then best, bestDistance = player, distance end
+            end
+        end
+    end
+    return best, bestDistance
+end
+
+-- Plain zombies and other A-Life NPCs around the NPC, from the snapshot A-Life's perception
+-- refreshes every 200 ms (Perception.zombieSnapshot: bodies / actors with x, y, z).
+local function crowdAround(raw, actor, shell, x, y)
+    local snapshot = resolve("Perception.zombieSnapshot")
+    if type(snapshot) ~= "table" or x == nil then return end
+    local near, around = 0, 0
+    for _, sampled in ipairs(type(snapshot.bodies) == "table" and snapshot.bodies or {}) do
+        local sx, sy = tonumber(sampled.x), tonumber(sampled.y)
+        if sx ~= nil then
+            local distance = flatDistance(x, y, sx, sy)
+            if distance <= 25 then
+                around = around + 1
+                if distance <= 10 then near = near + 1 end
+            end
+        end
+    end
+    raw.zombiesNear, raw.zombiesAround = near, around
+    local group = type(actor.memory) == "table" and actor.memory.groupId or nil
+    local peek = resolve("ActorRegistry.peek")
+    local squad, others = 0, 0
+    for _, sampled in ipairs(type(snapshot.actors) == "table" and snapshot.actors or {}) do
+        local sx, sy = tonumber(sampled.x), tonumber(sampled.y)
+        if sampled.body ~= shell and sx ~= nil and flatDistance(x, y, sx, sy) <= 10 then
+            local data = modDataOf(sampled.body)
+            local uid = data ~= nil and data.ProjectALifeUID or nil
+            local record = nil
+            if type(uid) == "string" and type(peek) == "function" then
+                local ok, found = pcall(peek, uid)
+                record = ok and found or nil
+            end
+            local theirs = type(record) == "table" and type(record.memory) == "table" and record.memory.groupId or nil
+            if group ~= nil and theirs == group then squad = squad + 1 else others = others + 1 end
+        end
+    end
+    raw.squadNear, raw.othersNear = squad, others
+end
+
+-- What the NPC knows at a decision, as plain values for ALifeBrain.Features.vector.
+function Hooks.decisionObservation(kind, actor, shell, context, now)
+    local raw = {}
+    local data = modDataOf(shell) or {}
+    pcall(function() raw.health = shell:getHealth() end)
+    raw.maxHealth = tonumber(data.ProjectALifeMaximumHealth)
+    raw.wounds = tonumber(data.ProjectALifeWounds)
+    local bleedAt, downedUntil = tonumber(data.ProjectALifeBleedOutAtMs), tonumber(data.ProjectALifeDownedUntilMs)
+    raw.bleeding = bleedAt ~= nil and bleedAt > now
+    raw.downed = downedUntil ~= nil and downedUntil > now
+    raw.endurance, raw.enduranceMax = tonumber(data.ProjectALifeEndurance), tonumber(data.ProjectALifeEnduranceMaximum)
+    raw.weaponClass = data.ProjectALifeWeaponClass
+    raw.rounds = tonumber(data.ProjectALifeLoadedRounds)
+    raw.jammed = data.ProjectALifeWeaponJammed == true
+    local fearUntil, panicUntil = tonumber(data.ProjectALifeFearUntilMs), tonumber(data.ProjectALifePanicUntilMs)
+    raw.afraid = (fearUntil ~= nil and fearUntil > now) or (panicUntil ~= nil and panicUntil > now)
+
+    local x, y = xyzOf(shell)
+    local threat = type(context) == "table" and context.threat or nil
+    raw.threat = threat ~= nil
+    if threat ~= nil then
+        raw.threatKind = context.threatKind
+        local tx, ty = xyzOf(threat)
+        if tx ~= nil and x ~= nil then raw.threatDistance = flatDistance(x, y, tx, ty) end
+    end
+    crowdAround(raw, actor, shell, x, y)
+
+    local player, distance = nearestPlayer(x, y)
+    if player ~= nil then
+        raw.playerDistance = distance
+        raw.playerArmed = armed(player)
+        pcall(function() raw.playerAiming = player:isAiming() == true end)
+        raw.stance = Hooks.stance(actor, player)
+    end
+    pcall(function() raw.hour = getGameTime():getHour() + getGameTime():getMinutes() / 60 end)
+
+    local loop = decisions()
+    local uid = actor.uid
+    if loop ~= nil then
+        local order = type(loop.orders) == "table" and loop.orders[uid] or nil
+        raw.order = type(order) == "table" and order.kind or nil
+        local state = type(loop.states) == "table" and loop.states[uid] or nil
+        raw.previous = type(state) == "table" and state.kind or nil
+    end
+    local mind = ALifeBrain.Dialogue ~= nil and ALifeBrain.Dialogue.minds[uid] or nil
+    if type(mind) == "table" then raw.trust, raw.fear = mind.trust, mind.fear end
+    local memory = type(actor.memory) == "table" and actor.memory or {}
+    raw.robbery = memory.robbery ~= nil
+    raw.talkHold = (tonumber(memory.talkHoldUntilMs) or 0) > now
+    return raw
+end
+
+-- Companion discipline (Companion.lua) -----------------------------------------------
+-- An A-Life "response" module (runs when a threat is perceived, before A-Life fights it),
+-- between A-Life's flee (30) and panic (34). A-Life only runs modules a behavior profile
+-- lists in its overlays, so the id is added to every profile at run time (nothing saved,
+-- no A-Life file changed); the module answers nil for anyone not following a player.
+
+Hooks.COMPANION_PRIORITY = 32
+Hooks.companionStats = { regroup = 0, fall_back = 0 }
+
+local function zombiesWithin(x, y, radius)
+    local snapshot = resolve("Perception.zombieSnapshot")
+    local count = 0
+    if type(snapshot) ~= "table" or x == nil then return 0 end
+    for _, sampled in ipairs(type(snapshot.bodies) == "table" and snapshot.bodies or {}) do
+        local sx, sy = tonumber(sampled.x), tonumber(sampled.y)
+        if sx ~= nil and flatDistance(x, y, sx, sy) <= radius then count = count + 1 end
+    end
+    return count
+end
+
+local function healthRatio(actor, shell)
+    local survival = resolve("Survival")
+    if type(survival) == "table" and type(survival.healthRatio) == "function" then
+        local ok, ratio = pcall(survival.healthRatio, actor, shell)
+        if ok and tonumber(ratio) ~= nil then return tonumber(ratio) end
+    end
+    local health, maximum = nil, tonumber((modDataOf(shell) or {}).ProjectALifeMaximumHealth) or 1
+    pcall(function() health = shell:getHealth() end)
+    return (tonumber(health) or maximum) / (maximum > 0 and maximum or 1)
+end
+
+local function hasFirearm(shell)
+    local survival = resolve("Survival")
+    if type(survival) == "table" and type(survival.hasFirearm) == "function" then
+        local ok, yes = pcall(survival.hasFirearm, shell)
+        if ok then return yes == true end
+    end
+    local class = (modDataOf(shell) or {}).ProjectALifeWeaponClass
+    return class == "handgun" or class == "rifle"
+end
+
+-- The player an NPC follows on a player's order (ours or A-Life's own), or nil.
+local function followedPlayer(actor, now)
+    local loop = decisions()
+    local order = loop ~= nil and type(loop.orders) == "table" and loop.orders[actor.uid] or nil
+    if type(order) ~= "table" or order.kind ~= "follow" or order.source == "leader" or order.player == nil then return nil end
+    if order.generation ~= nil and order.generation ~= actor.generation then return nil end
+    if order.untilMs ~= nil and now >= order.untilMs then return nil end
+    return order.player
+end
+
+-- A movement as a "retreat" state: A-Life's loop does not interrupt retreats every time it
+-- sees the threat again (it does interrupt plain movement), so the NPC keeps going.
+local function moveTo(context, actor, shell, target, reason, pace)
+    if type(context.startMovement) ~= "function" then return nil end
+    local state = context.startMovement(actor, shell, target, "companion_" .. reason, { kind = "retreat",
+        activity = "moving", pace = pace or "run", timeoutMs = 8000, threat = context.threat,
+        threatKind = context.threatKind })
+    if state ~= nil then state.reason = "companion_" .. reason end
+    return state
+end
+
+-- A point away from the threat (A-Life's own retreat geometry), or nil.
+local function awayFrom(shell, threat, tiles)
+    local survival = resolve("Survival")
+    if type(survival) ~= "table" or type(survival.retreatTarget) ~= "function" then return nil end
+    local ok, target = pcall(survival.retreatTarget, shell, threat, tiles)
+    return ok and type(target) == "table" and target or nil
+end
+
+local function sneaking(player)
+    local yes = false
+    pcall(function() yes = player:isSneaking() == true end)
+    return yes
+end
+
+local function running(player)
+    local yes = false
+    pcall(function() yes = player:isRunning() == true or player:isSprinting() == true end)
+    return yes
+end
+
+-- What a follower facing a zombie should do (Companion.decide), as an A-Life state, or nil.
+function Hooks.companionEvaluate(actor, shell, context)
+    local Companion = ALifeBrain.Companion
+    if Companion == nil or type(context) ~= "table" or context.threatKind ~= "zombie" or type(actor) ~= "table" then
+        return nil
+    end
+    local now = tonumber(context.now) or Hooks.nowMs()
+    local player = followedPlayer(actor, now)
+    if player == nil then return nil end
+    local x, y = xyzOf(shell)
+    local px, py, pz = xyzOf(player)
+    local tx, ty = xyzOf(context.threat)
+    if x == nil or px == nil or tx == nil then return nil end
+    local view = {
+        following = true,
+        threatKind = context.threatKind,
+        threatFromPlayer = flatDistance(tx, ty, px, py),
+        threatFromNpc = flatDistance(tx, ty, x, y),
+        npcFromPlayer = flatDistance(x, y, px, py),
+        closeZombies = zombiesWithin(x, y, Companion.settings.crowdRadius),
+        firearm = hasFirearm(shell),
+        health = healthRatio(actor, shell),
+        sneaking = sneaking(player),
+        playerRunning = running(player),
+    }
+    local action = Companion.decide(view, actor.uid, now)
+    Hooks.companionLast = { uid = actor.uid, action = action, view = view }
+    if action == nil then return nil end
+    Hooks.companionStats[action] = (Hooks.companionStats[action] or 0) + 1
+    local pace = Companion.pace(view, action)
+    local towardPlayer = action == "regroup" or Companion.fallBackTo(view) == "player"
+    local beside = view.npcFromPlayer <= Companion.settings.besideTiles
+    if towardPlayer and beside and action == "regroup" then
+        -- Already beside the player: stay, do not go after it.
+        return { kind = "idle", intent = "companion_hold", cooldownUntilMs = now + 1200 }
+    end
+    if towardPlayer and not beside then
+        -- (Beside the player and still swamped: get away instead, below.)
+        local spot = { x = px, y = py, z = pz }
+        local loop = decisions()
+        if loop ~= nil and type(loop.followTarget) == "function" then
+            local ok, target = pcall(loop.followTarget, shell, spot)
+            if ok and type(target) == "table" then spot = target end
+        end
+        local state = moveTo(context, actor, shell, spot, action, pace)
+        if state ~= nil then return state end
+    end
+    if action == "fall_back" then
+        if pace == "walk" then
+            -- Sneaking and nothing right on it: slip away quietly instead of A-Life's
+            -- shouted sprint.
+            local target = awayFrom(shell, context.threat, 8)
+            local state = target ~= nil and moveTo(context, actor, shell, target, "slip_away", "walk") or nil
+            if state ~= nil then return state end
+        end
+        if type(context.startRetreat) == "function" then
+            return context.startRetreat(actor, shell, context.threat, context.threatKind, now, "companion_outnumbered")
+        end
+    end
+    return nil
+end
+
+-- Followers sneak while their player sneaks: A-Life crouches an NPC (ALifeSneak, slower walk,
+-- no sprint bursts) while Stealth.stanceActive(modData) is true, which it only is for its own
+-- stealth conduct. The wrapper adds our followers, in the same combat phases.
+function Hooks.wrapStealthStance()
+    local stealth = resolve("Stealth")
+    if type(stealth) ~= "table" or type(stealth.stanceActive) ~= "function" then return false, "stealth_unavailable" end
+    if Hooks.originalStanceActive ~= nil then return true, "already_installed" end
+    local original = stealth.stanceActive
+    Hooks.originalStanceActive = original
+    stealth.stanceActive = function(data)
+        if original(data) then return true end
+        local Companion = ALifeBrain.Companion
+        if type(data) ~= "table" or Companion == nil or Companion.sneakers[data.ProjectALifeUID] ~= true then return false end
+        local phase = tostring(data.ProjectALifeCombatPhase or "idle")
+        return phase == "idle" or phase == "" or phase == "aborted" or phase == "approach" or phase == "cover"
+    end
+    return true, "installed"
+end
+
+-- Who sneaks now (called a few times a second).
+function Hooks.updateFollowerStealth()
+    local Companion = ALifeBrain.Companion
+    local loop = decisions()
+    if Companion == nil or loop == nil then return 0 end
+    local count = 0
+    for _ in pairs(Companion.refreshSneakers(loop.orders, sneaking)) do count = count + 1 end
+    return count
+end
+
+-- Our A-Life modules -----------------------------------------------------------------
+-- Registered through A-Life's own ModuleRegistry. A-Life only runs modules a behavior profile
+-- lists in its overlays, so each id is added to every profile at run time (nothing saved, no
+-- A-Life file changed; repeated now and then for profiles added later). Every module answers
+-- nil, which leaves the decision to A-Life, unless its own case applies.
+--   alifeBrainParley (29): a hostile NPC that sees the player talks first (Parley.lua)
+--   alifeBrainStandoff (31): an NPC facing another NPC warns before shooting (Standoff.lua)
+--   alifeBrainCompanion (32): a follower facing zombies keeps with the player (Companion.lua)
+-- A-Life's own flee is 30 and panic 34.
+
+local function voice(shell, event)
+    local current = resolve("Voice")
+    if type(current) == "table" and type(current.play) == "function" then
+        pcall(current.play, shell, event, { force = true, ignoreBarkThrottle = true })
+    end
+end
+Hooks.voice = voice
+
+local function face(shell, target)
+    pcall(function()
+        local fence = resolve("AIFence")
+        if type(fence) == "table" and type(fence.faceAimPoint) == "function" then
+            fence.faceAimPoint(shell, target:getX(), target:getY(), Hooks.nowMs())
+        else
+            shell:faceThisObject(target)
+        end
+    end)
+end
+
+local function gesture(shell, name)
+    local animations = resolve("Animations")
+    if type(animations) == "table" and type(animations.apply) == "function" then pcall(animations.apply, shell, name) end
+end
+
+-- Did threat hit this NPC lately, or is it fighting it right now?
+local function attackedBy(actor, shell, threat, threatUid, now)
+    local perception = resolve("Perception")
+    if type(perception) == "table" and type(perception.retaliationTarget) == "function" then
+        local ok, attacker = pcall(perception.retaliationTarget, actor.uid, now)
+        if ok and attacker ~= nil and attacker == threat then return true end
+    end
+    local loop = decisions()
+    local theirs = loop ~= nil and type(loop.states) == "table" and loop.states[threatUid] or nil
+    return type(theirs) == "table" and theirs.kind == "combat" and theirs.threat == shell
+end
+
+function Hooks.standoffEvaluate(actor, shell, context)
+    local Standoff = ALifeBrain.Standoff
+    if Standoff == nil or type(context) ~= "table" or context.threatKind ~= "actor" or type(actor) ~= "table" then
+        return nil
+    end
+    local threat = context.threat
+    local data = modDataOf(threat)
+    local threatUid = data ~= nil and data.ProjectALifeUID or nil
+    if type(threatUid) ~= "string" then return nil end
+    local now = tonumber(context.now) or Hooks.nowMs()
+    local x, y = xyzOf(shell)
+    local tx, ty = xyzOf(threat)
+    if x == nil or tx == nil then return nil end
+    -- While a crew talks with the player nobody on either side starts shooting (the truce
+    -- covers only the player; their follower and the crew would otherwise end the talk).
+    local parley = ALifeBrain.Parley ~= nil and ALifeBrain.Parley.active or nil
+    if parley ~= nil and (parley.crew[actor.uid] or parley.crew[threatUid]) and not attackedBy(actor, shell, threat, threatUid, now) then
+        face(shell, threat)
+        return { kind = "idle", intent = "standoff_parley", cooldownUntilMs = now + 700 }
+    end
+    local step, event, ignoreMs = Standoff.step(actor.uid .. ">" .. threatUid,
+        { distance = flatDistance(x, y, tx, ty), attacked = attackedBy(actor, shell, threat, threatUid, now) }, now)
+    if event ~= nil then voice(shell, event) end
+    if step == "fight" then return nil end
+    if step == "ignore" then
+        -- Out of range, or they kept apart: A-Life stops seeing it as a threat for a while (being
+        -- attacked clears that) and the NPC goes back to what it was doing.
+        local ignore = resolve("Perception.ignore")
+        if type(ignore) == "function" then pcall(ignore, actor.uid, threat, ignoreMs) end
+        return { kind = "idle", intent = "standoff_part", cooldownUntilMs = now + 300 }
+    end
+    face(shell, threat)
+    if step == "warn" then gesture(shell, "stop") end
+    -- A follower backs off to its player instead of standing its ground.
+    local player = followedPlayer(actor, now)
+    if player ~= nil then
+        local px, py, pz = xyzOf(player)
+        if px ~= nil and flatDistance(x, y, px, py) > ALifeBrain.Companion.settings.besideTiles then
+            local state = moveTo(context, actor, shell, { x = px, y = py, z = pz }, "standoff", "walk")
+            if state ~= nil then return state end
+        end
+    end
+    return { kind = "idle", intent = "standoff_" .. step, cooldownUntilMs = now + 700 }
+end
+
+-- Parley (Parley.lua) helpers ---------------------------------------------------------
+
+-- The key A-Life's relations and reputation use for a player.
+function Hooks.reputationKey(player)
+    local key = resolve("Reputation.playerKey")
+    if type(key) == "function" then
+        local ok, value = pcall(key, player)
+        if ok and value ~= nil then return value end
+    end
+    return Hooks.playerKey(player)
+end
+
+function Hooks.groupKey(actor)
+    local memory = type(actor) == "table" and type(actor.memory) == "table" and actor.memory or {}
+    return tostring(memory.groupId or ("solo:" .. tostring(actor.uid)))
+end
+
+-- Why this hostile NPC would rather shoot than talk, or nil.
+function Hooks.parleyBlocked(actor, shell, player, now, tiles)
+    if multiplayerClient() then return "multiplayer" end
+    if Hooks.inCombat(actor) then return "fighting" end
+    local memory = type(actor.memory) == "table" and actor.memory or {}
+    if type(memory.robbery) == "table" then return "robbery" end -- A-Life's own hold-up runs
+    local key = Hooks.reputationKey(player)
+    if key ~= nil and type(memory.hostileToPlayerKeys) == "table" and memory.hostileToPlayerKeys[key] == true then
+        return "grudge" -- attacked, or walked through its warnings
+    end
+    local reputation = resolve("Reputation.recordedStatus")
+    if type(reputation) == "function" then
+        local ok, earned = pcall(reputation, player, actor)
+        if ok and earned == "hostile" then return "grudge" end
+    end
+    local inVehicle = false
+    pcall(function() inVehicle = player:getVehicle() ~= nil end)
+    if inVehicle then return "vehicle" end
+    if not Hooks.withinReach(player, shell, tiles) then return "far" end
+    if not Hooks.lineOfSight(player, shell) then return "unseen" end
+    return nil
+end
+
+-- The NPC and its squad mates within tiles: { uid = true }.
+function Hooks.crewOf(actor, shell, tiles)
+    local crew = { [actor.uid] = true }
+    local group = type(actor.memory) == "table" and actor.memory.groupId or nil
+    local each = resolve("ActorRegistry.each")
+    if group == nil or type(each) ~= "function" then return crew end
+    local x, y = xyzOf(shell)
+    pcall(each, function(record)
+        if type(record) == "table" and record.lifecycle == "active" and type(record.memory) == "table"
+                and record.memory.groupId == group then
+            local where = type(record.worldPosition) == "table" and record.worldPosition or {}
+            local rx, ry = tonumber(where.x), tonumber(where.y)
+            if x == nil or rx == nil or flatDistance(x, y, rx, ry) <= tiles then crew[record.uid] = true end
+        end
+    end)
+    return crew
+end
+
+-- A-Life's own post-robbery truce: Relations.hostileToPlayer is false for the player until
+-- untilMs (nil clears it), so the crew does not shoot while it lasts.
+function Hooks.truce(crew, player, untilMs)
+    local current = talk()
+    local key = Hooks.reputationKey(player)
+    if current == nil or type(current.writeMemory) ~= "function" or key == nil then return false end
+    for uid in pairs(crew) do
+        pcall(current.writeMemory, uid, function(memory)
+            if untilMs == nil then
+                if type(memory.robberyTruce) == "table" then memory.robberyTruce[key] = nil end
+            else
+                if type(memory.robberyTruce) ~= "table" then memory.robberyTruce = {} end
+                memory.robberyTruce[key] = untilMs
+            end
+        end)
+    end
+    return true
+end
+
+-- Makes the crew think again now (after the truce ends, that means facing the player).
+function Hooks.rethink(crew)
+    local loop = decisions()
+    if loop == nil or type(loop.refreshDirective) ~= "function" then return end
+    for uid in pairs(crew) do pcall(loop.refreshDirective, uid) end
+end
+
+function Hooks.parleyEvaluate(actor, shell, context)
+    local Parley = ALifeBrain.Parley
+    if Parley == nil or type(context) ~= "table" or context.threatKind ~= "player" or type(actor) ~= "table" then
+        return nil
+    end
+    local player = context.threat
+    if not Hooks.isPlayer(player) then return nil end
+    local now = tonumber(context.now) or Hooks.nowMs()
+    if Parley.consider(actor, shell, player, now) ~= "hold" then return nil end
+    face(shell, player)
+    return { kind = "idle", intent = "parley", cooldownUntilMs = now + 800 }
+end
+
+-- Registering ------------------------------------------------------------------------
+
+Hooks.MODULES = {
+    { id = "alifeBrainParley", priority = 29, label = "A-Life Brain: parley",
+      summary = "A hostile NPC that sees the player calls out and talks (tribute, threats) before it shoots.",
+      evaluate = function(actor, shell, context) return Hooks.parleyEvaluate(actor, shell, context) end },
+    { id = "alifeBrainStandoff", priority = 31, label = "A-Life Brain: standoff",
+      summary = "An NPC facing another NPC warns it off, warns again, then fights.",
+      evaluate = function(actor, shell, context) return Hooks.standoffEvaluate(actor, shell, context) end },
+    { id = "alifeBrainCompanion", priority = Hooks.COMPANION_PRIORITY, label = "A-Life Brain: companion",
+      summary = "Followers stay with the player: no chasing far zombies, fall back from crowds and when badly hurt.",
+      evaluate = function(actor, shell, context) return Hooks.companionEvaluate(actor, shell, context) end },
+}
+
+-- Registers our modules once and opens them in every behavior profile (safe to repeat).
+-- Returns true, a note, or false, a reason.
+function Hooks.installModules()
+    local registry = Hooks.available() and ProjectALife.ModuleRegistry or nil
+    if registry == nil or type(registry.register) ~= "function" then return false, "module_registry_unavailable" end
+    local opened, added = 0, {}
+    local profiles = resolve("BehaviorProfiles.definitions")
+    for _, module in ipairs(Hooks.MODULES) do
+        for _, profile in ipairs(type(profiles) == "table" and profiles or {}) do
+            if type(profile) == "table" then
+                if type(profile.overlays) ~= "table" then profile.overlays = {} end
+                if profile.overlays[module.id] ~= true then
+                    profile.overlays[module.id] = true
+                    opened = opened + 1
+                end
+            end
+        end
+        if type(registry.modules) ~= "table" or registry.modules[module.id] == nil then
+            local ok, reason = registry.register({ id = module.id, label = module.label, summary = module.summary,
+                kind = "reaction", dispatch = "response", priority = module.priority, evaluate = module.evaluate })
+            if not ok then return false, module.id .. ": " .. tostring(reason) end
+            added[#added + 1] = module.id
+        end
+    end
+    if #added == 0 then return true, "already_installed (" .. tostring(opened) .. " profile entries opened)" end
+    return true, table.concat(added, ", ") .. " in " .. tostring(opened) .. " profile entries"
+end
+
 return Hooks
+

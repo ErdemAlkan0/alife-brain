@@ -78,6 +78,16 @@ API:
   player = <IsoPlayer>, anchor = {x,y,z}, untilMs?, quiet? })`. `follow` intent'i için doğrudan kullanılabilir.
 - `Decisions.refreshDirective(uid)` → mevcut hareket/idle durumunu iptal edip yeniden karar verdirir.
 - `Decisions.traceDecisions = true` olursa her karar `Telemetry.emit("decision_trace", {uid, kind, intent})` üretir.
+- **Uygulandı (3. aşama):** `Registry.evaluate(kind, ...)` kazanan durumla birlikte **modül id'sini** de döndürür
+  (`return result, module.id`), karar döngüsü id'yi atar. Döngü `local Modules = ProjectALife.ModuleRegistry` tuttuğu
+  için fonksiyon her çağrıda tablodan okunur; `Hooks.installDecisionTap` `ModuleRegistry.evaluate`'i sarmalar, yalnızca
+  `only == nil` olan tam zincir çalışmalarını (`decision`, `response`) izler ve sonucu değiştirmeden döndürür. Etiket =
+  modül id'si ya da `default` (zincir boş döndü, A-Life'ın kendi akışı). İzinli modüller (eylem maskesi):
+  `Registry.order` içinde `dispatch == kind` olanlar ve `Registry.allows(actor, id)`.
+- Gözlem kaynakları (`Hooks.decisionObservation`): gövde modData'sı (§9), `context.threat/threatKind`,
+  `Perception.zombieSnapshot` (algı her 200 ms'de yeniler: `bodies` = sıradan zombiler, `actors` = A-Life gövdeleri,
+  ikisi de `{body, x, y, z}`; algı çalışmadan önce `nil`), `ActorRegistry.peek(uid).memory.groupId` (squad),
+  `DecisionLoop.states/orders`, `Talk.stance`, en yakın oyuncu.
 
 ## 5. Modül kaydı — `shared/ProjectALife/Behaviours/ALifeModuleRegistry.lua` (RL kancası)
 
@@ -121,6 +131,42 @@ Not: `stealth`, `sniper`, `medic`, `ambusher`, `leader` **primary** modüller; y
 çağrılıyorlar). Bu tablo ilk RL aksiyon uzayı için başlangıç; CLAUDE.md'deki "devriye, baskın, bölge tutma, uyarma,
 soyma, yeniden toplanma" ile eşleme: devriye → `patrolRest`/varsayılan program, bölge tutma → `fortify`/`nightHold`,
 uyarma → `careful`, soyma → `robbery`, yeniden toplanma → `regroup`, baskın → `ModuleBreach` (`doorstack`/`cqbsweep`).
+
+### Takipçi tehdit davranışı (oyunda görüldü, 2026-10-09)
+
+- `decideInternal` önce `findThreat` → `respondToThreat` çalıştırır; emir (`orders`) yalnızca tehdit yoksa devreye
+  girer. Takip emrinin tasması yok (`Combat.leashFor` yalnızca `memory.stance` / `garrisonPost` olan nöbetçiler için).
+  Sonuç: takipçi gördüğü her zombiye saldırır (Grace, yakın dövüş, 25 zombiye daldı).
+- Zombiye karşı A-Life'ın tek geri çekilmesi `flee` modülü (`Fear/ALifeModuleSurvival.lua`): can ≤
+  `Survival.retreatHealth` (~0,35). Fraksiyon üyelerinde `flee` profile göre kapalı olabilir (Grace'te yalnızca
+  `panic` vardı).
+- `interruptPassiveState`: `idle` / `movement` / `scavenging` / `recovering` durumları tehdit görüldükçe (son
+  taramada tehdit varsa her düşünmede) kesilir ve yeniden tepki verilir; `retreat` durumları kesilmez.
+- **Uygulandı:** `Hooks.installCompanionModule` → `alifeBrainCompanion` (`kind = "reaction"`, `dispatch = "response"`,
+  öncelik 32: `flee` 30 ile `panic` 34 arası). Profil izni için id çalışma zamanında her
+  `BehaviorProfiles.definitions[i].overlays` tablosuna eklenir (kayda yazılmaz; 30 s'de bir yeni profiller için
+  tekrarlanır). Yalnızca oyuncu takip emri (`DecisionLoop.orders[uid].kind == "follow"`, `source ~= "leader"`) ve zombi
+  tehdidinde karar verir (`Companion.lua`); oyuncuya dönüş `context.startMovement(..., { kind = "retreat" })` ile
+  (kesilmesin diye), uzaklaşma A-Life'ın `context.startRetreat`'i ile.
+
+### Gizli takip, NPC uyarıları, pazarlık (oyunda görüldü / istendi, 2026-10-09)
+
+- **Hız:** `orders` modülü takibi hızsız başlatır → `Movement` `walk`. `run` istenince `resolvePace` 14 s'de bir
+  650 ms koşu penceresi verir (tehlike duruşunda sürekli koşu) → "kısa koşular". Dünyaya ses yalnızca ateşli silah
+  atışı üretir (`Combat.worldNoise`); `Voice.play` dünya sesi üretmez.
+- **Eğilme:** `AIFence` her karede `Stealth.stanceActive(modData)` sonucunu `ALifeSneak` animasyon değişkenine ve
+  `ProjectALifeSneakActive`'e yazar (yürüme ×0,85, sprint koşuya iner, sırttan saldırı çarpanı). Yalnızca
+  `ProjectALifeConduct == "stealth"` NPC'ler için açık. **Uygulandı:** `Hooks.wrapStealthStance` oyuncusu eğilen
+  takipçileri ekler (`Companion.sneakers`, 0,5 s'de bir `DecisionLoop.orders`'tan).
+- **Uyarı merdiveni:** `ModuleCareful` (karar zinciri, öncelik 5) yalnızca oyunculara uyarır (`CAREFUL_KEEP_BACK` →
+  `CAREFUL_LAST_WARNING` → `CAREFUL_HOSTILE`, fraksiyon sesleri `Audio/ALifeFactionVoiceStyles.lua`);
+  `Careful.evaluateActor` hep `nil`. **Uygulandı:** `alifeBrainStandoff` aynı merdiveni NPC↔NPC için uygular.
+- **Ateşkes:** `memory.robberyTruce[Reputation.playerKey(player)] = untilMs` iken `Relations.hostileToPlayer` false
+  döner (görünen tutum `playerStance` yine "hostile"). A-Life bunu soygundan sonra kullanır; `memory.robbery`
+  etkinken de ekip oyuncuyu tehdit saymaz. **Uygulandı:** pazarlık ekibe 6 s'lik ateşkes yazar ve 2 s'de bir
+  yeniler; barışta uzun ateşkes, çatışmada silinir + `DecisionLoop.refreshDirective`.
+- **A-Life'ın soygunu** (`ModuleRobbery`): yalnızca haydut/çete kayıtlı, en az 2 kişilik, silahlı ekipler; kendi
+  taraması (55 kare) tehdit tepkisinden önce başlar. Pazarlık, soygun etkinken (`memory.robbery`) devreye girmez.
 
 ## 6. Konuşma sistemi (LLM kancası)
 

@@ -72,6 +72,12 @@ Text.strings = {
         trade_open_window = "{name} offers a trade: {items}. Open the conversation window to trade.",
         trade_wanted_tag = "wanted",
         trade_nothing = "{name}: nothing to trade.",
+        parley_start = "{name} has you covered. Talk your way out, pay (walk up to hand it over), or fight. Closing this window means a fight.",
+        parley_fight = "{name} opens fire!",
+        parley_paid = "{name} takes the tribute and lets you go.",
+        parley_sent_away = "{name} lets you go. Get moving.",
+        parley_got_away = "You got away from {name}.",
+        parley_gone = "{name} is gone.",
     },
     TR = {
         title = "A-LIFE BRAIN  /  SOHBET",
@@ -138,6 +144,12 @@ Text.strings = {
         trade_open_window = "{name} takas öneriyor: {items}. Takas için sohbet penceresini aç.",
         trade_wanted_tag = "istenen",
         trade_nothing = "{name}: takas edecek bir şey yok.",
+        parley_start = "{name} seni nişan almış. Konuşarak kurtul, haraç ver (vermek için yanına yürü) ya da savaş. Bu pencereyi kapatırsan çatışma başlar.",
+        parley_fight = "{name} ateş açıyor!",
+        parley_paid = "{name} haracı aldı, gitmene izin veriyor.",
+        parley_sent_away = "{name} gitmene izin veriyor. Hemen uzaklaş.",
+        parley_got_away = "{name} elinden kurtuldun.",
+        parley_gone = "{name} ortadan kayboldu.",
     },
 }
 

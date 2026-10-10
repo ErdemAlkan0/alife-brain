@@ -1,12 +1,16 @@
 -- Entry point: starts the sidecar bridge, keeps a ping going, runs the in-game tests
 -- in debug mode. Debug console helpers: ALifeBrain.status(), ALifeBrain.ping(),
--- ALifeBrain.runTests().
+-- ALifeBrain.runTests(), ALifeBrain.policy().
 
 require "ALifeBrain/Json"
 require "ALifeBrain/Bridge"
 require "ALifeBrain/ALifeBrainHooks"
 require "ALifeBrain/EventLog"
 require "ALifeBrain/Dialogue"
+require "ALifeBrain/DecisionLog"
+require "ALifeBrain/Companion"
+require "ALifeBrain/Standoff"
+require "ALifeBrain/Parley"
 require "ALifeBrain/ChatWindow"
 require "ALifeBrain/Tests/AllTests"
 
@@ -16,8 +20,11 @@ ALifeBrain.VERSION = "0.1.0"
 local Json, Bridge, Hooks = ALifeBrain.Json, ALifeBrain.Bridge, ALifeBrain.Hooks
 
 local Main = {
-    settings = { pingIntervalMs = 10000, logEveryNthPong = 6, runTestsInDebug = true },
+    settings = { pingIntervalMs = 10000, logEveryNthPong = 6, runTestsInDebug = true, modulesRefreshMs = 30000,
+        stealthMs = 500 },
     lastPingAtMs = -math.huge,
+    modulesAtMs = nil, -- set once our A-Life modules are in
+    stealthAtMs = 0,
     pongs = 0,
     lastRttMs = nil,
 }
@@ -92,6 +99,21 @@ function Main.onTick()
     if bridge == nil then return end
     bridge:tick()
     ALifeBrain.Dialogue.tick(nowMs())
+    ALifeBrain.DecisionLog.tick(nowMs())
+    if Main.modulesAtMs ~= nil then
+        local now = nowMs()
+        ALifeBrain.Parley.tick(now)
+        if now - Main.stealthAtMs >= Main.settings.stealthMs then
+            Main.stealthAtMs = now
+            Hooks.updateFollowerStealth()
+        end
+        -- Behavior profiles added later (custom factions) get our modules too.
+        if now - Main.modulesAtMs >= Main.settings.modulesRefreshMs then
+            Main.modulesAtMs = now
+            Hooks.installModules()
+            ALifeBrain.Standoff.forget(now)
+        end
+    end
     if bridge:isOnline() and nowMs() - Main.lastPingAtMs >= Main.settings.pingIntervalMs then
         Main.ping()
     end
@@ -132,6 +154,19 @@ function Main.onGameStart()
         log("LLM dialogue hook " .. (installed and "ready" or "not installed") .. " (" .. tostring(reason) .. ")")
         local keyed, keyReason = Hooks.wrapTalkInput(ALifeBrain.Chat.openFromKey)
         log("chat key opens the conversation window: " .. tostring(keyed) .. " (" .. tostring(keyReason) .. ")")
+        -- Behavior cloning: watch A-Life's decisions (never changes them).
+        local tapped, tapReason = Hooks.installDecisionTap(ALifeBrain.DecisionLog.onDecision)
+        log("decision log " .. (tapped and "ready" or "not installed") .. " (" .. tostring(tapReason) .. ")")
+        -- Our A-Life modules: hostile NPCs talk before shooting, NPCs warn each other, followers
+        -- keep with the player (and sneak when the player sneaks).
+        local modules, modulesReason = Hooks.installModules()
+        log("A-Life modules " .. (modules and "ready" or "not installed") .. " (" .. tostring(modulesReason) .. ")")
+        if modules then Main.modulesAtMs = nowMs() end
+        local sneak, sneakReason = Hooks.wrapStealthStance()
+        log("followers sneak with the player: " .. tostring(sneak) .. " (" .. tostring(sneakReason) .. ")")
+        local loaded, notes = ALifeBrain.DecisionLog.loadPolicy()
+        log("policy (shadow mode): " .. (#loaded > 0 and table.concat(loaded, ", ") or "none trained yet")
+            .. (#notes > 0 and (" [" .. table.concat(notes, "; ") .. "]") or ""))
     end
 end
 
@@ -147,8 +182,36 @@ function ALifeBrain.status()
     status.features = bridge.features
     status.dialogue = ALifeBrain.Dialogue.metrics
     status.dialogueLastError = ALifeBrain.Dialogue.lastError
+    local decisions = ALifeBrain.DecisionLog.stats
+    status.decisions = { seen = decisions.seen, sampled = decisions.sampled, sent = decisions.sent,
+        dropped = decisions.dropped, failed = decisions.failed, queued = #ALifeBrain.DecisionLog.queue,
+        tapError = Hooks.decisionTapError, shadow = ALifeBrain.DecisionLog.agreement() }
+    status.companion = { regroup = Hooks.companionStats.regroup, fallBack = Hooks.companionStats.fall_back,
+        last = Hooks.companionLast }
+    status.standoff = ALifeBrain.Standoff.stats
+    local parley = ALifeBrain.Parley
+    status.parley = { stats = parley.stats, active = parley.active ~= nil and parley.active.uid or nil,
+        lastNote = parley.lastNote }
     log(tostring(Json.encode(status)))
     return status
+end
+
+-- Debug console: which choices A-Life made most (from the sampled decisions), and how
+-- often the trained policy agrees with it in shadow mode.
+function ALifeBrain.policy()
+    local labels = {}
+    for label, count in pairs(ALifeBrain.DecisionLog.stats.labels) do labels[#labels + 1] = { label = label, count = count } end
+    table.sort(labels, function(a, b) return a.count > b.count end)
+    for index = 1, math.min(#labels, 15) do
+        log("  " .. labels[index].label .. " x" .. Json.intToString(labels[index].count))
+    end
+    for kind, agreement in pairs(ALifeBrain.DecisionLog.agreement()) do
+        if agreement.n > 0 then
+            log("  shadow " .. kind .. ": agrees " .. Json.intToString(math.floor(agreement.rate * 100 + 0.5))
+                .. "% of " .. Json.intToString(agreement.n))
+        end
+    end
+    return ALifeBrain.DecisionLog.agreement()
 end
 
 function ALifeBrain.ping() return Main.ping() end

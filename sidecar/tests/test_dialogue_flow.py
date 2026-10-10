@@ -171,6 +171,17 @@ class HistoryAndActionTests(FlowTestCase):
         self.assertEqual(self.responses()[deal_id]["data"]["trade"],
                          {"decision": "counter", "npcOffer": ["Konserve Fasulye"], "npcWants": ["Bandaj"]})
 
+    def test_a_standoff_opening_is_not_the_strangers_words(self):
+        self.sidecar.provider = ScriptedProvider('{"say": "Dur orada! Ne taşıyorsun?", "intent": "warn"}')
+        opening = self.send("dialogue", dict(self.talk("(The stranger has just walked into your sights.)"),
+                                             standoff={"opening": True}, stance="hostile"))
+        self.sidecar.step()
+        self.assertEqual(self.responses()[opening]["data"]["say"], "Dur orada! Ne taşıyorsun?")
+        history = self.send("history", {"uid": "u1", "playerKey": "sp:0"})
+        self.sidecar.step()
+        turns = self.responses()[history]["data"]["turns"]
+        self.assertEqual([(turn["speaker"], turn["text"]) for turn in turns], [("npc", "Dur orada! Ne taşıyorsun?")])
+
     def test_history_needs_uid_and_player(self):
         history_id = self.send("history", {"uid": "u1"})
         self.sidecar.step()

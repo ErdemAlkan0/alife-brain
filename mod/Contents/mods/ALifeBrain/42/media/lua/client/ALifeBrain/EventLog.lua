@@ -60,6 +60,8 @@ function EventLog.onHitZombie(zombie, attacker, bodyPartType, weapon)
     local npc = Hooks.describe(zombie)
     if npc == nil then return end
     local now = nowMs()
+    -- Hitting one of a crew that is talking ends the talk (Parley.lua).
+    if Hooks.isPlayer(attacker) and ALifeBrain.Parley ~= nil then pcall(ALifeBrain.Parley.onPlayerAttack, npc.uid, now) end
     if now - (EventLog.lastHitAtMs[npc.uid] or -math.huge) < EventLog.settings.hitRepeatMs then
         EventLog.metrics.throttled = EventLog.metrics.throttled + 1
         return

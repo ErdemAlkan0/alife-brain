@@ -17,6 +17,7 @@ from typing import Any, Callable
 
 from . import __version__
 from .config import DialogueSettings
+from .dataset import DatasetStore
 from .dialogue import BadRequest, InvalidReply, build_messages, parse_reply
 from .dialogue import parse_request as parse_dialogue
 from .events import EventStore
@@ -71,6 +72,7 @@ class Sidecar:
         events: EventStore,
         *,
         memory: MemoryStore | None = None,
+        dataset: DatasetStore | None = None,
         provider: Any = None,
         dialogue: DialogueSettings | None = None,
         executor: Executor | None = None,
@@ -85,6 +87,7 @@ class Sidecar:
         self.bridge = bridge
         self.events = events
         self.memory = memory
+        self.dataset = dataset
         self.provider = provider
         self.dialogue = dialogue or DialogueSettings()
         self.executor = executor or ThreadPoolExecutor(max_workers=2, thread_name_prefix="alifebrain")
@@ -121,6 +124,8 @@ class Sidecar:
     @property
     def features(self) -> list[str]:
         features = ["ping", "event"]
+        if self.dataset is not None:
+            features.append("dataset")
         if self.memory is not None:
             features.append("history")
         if self.memory is not None and self.provider is not None:
@@ -299,6 +304,16 @@ class Sidecar:
     def _event(self, request: Request, now: int) -> None:
         if not isinstance(request.data, dict) or not isinstance(request.data.get("kind"), str):
             raise HandlerError("bad_event")
+        if request.data["kind"] == "decision_samples":
+            # Training data, not memories: kept apart from events.jsonl.
+            if self.dataset is None:
+                raise HandlerError("dataset_unavailable")
+            before = self.dataset.count
+            stored = self.dataset.add_batch(request.data, ts=request.ts, session=request.session)
+            self.stats["samples"] = self.stats.get("samples", 0) + stored
+            if before // 500 != self.dataset.count // 500 or before == 0:
+                log.info("dataset: %d decisions stored (%d rejected)", self.dataset.count, self.dataset.rejected)
+            return
         self.events.append(ts=request.ts, received_ts=now, session=request.session, request_id=request.id,
                            event=request.data)
         if self.memory is not None:
@@ -340,7 +355,8 @@ class Sidecar:
                 log.info("reinterpreted LLM intent for %s: intent=%r item=%r -> intent=%s item=%s", uid,
                          reply.raw_intent, reply.raw_item, reply.intent, reply.item)
             done = self.clock()
-            self.memory.add_turn(uid, player_key, ts=now, speaker="player", text=dialogue.text)
+            if not dialogue.opening:  # an opening is a narration, not the stranger's words
+                self.memory.add_turn(uid, player_key, ts=now, speaker="player", text=dialogue.text)
             self.memory.add_turn(uid, player_key, ts=done, speaker="npc", text=reply.say)
             if reply.memory_note:
                 self.memory.add_memory("personal", uid, ts=done, kind="dialogue", text=reply.memory_note,

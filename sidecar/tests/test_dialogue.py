@@ -231,6 +231,30 @@ class ParseReplyTests(unittest.TestCase):
         reply = parse_reply('{"say": "Al.", "intent": "give", "item": "medicine"}', unnamed)
         self.assertEqual((reply.intent, reply.trade_decision), ("none", None), "cannot be put on the table: no gift")
 
+    def test_a_standoff_opening(self):
+        data = request_data(text="(The stranger has just walked into your sights. You call out to them first.)",
+                            stance="hostile", standoff={"opening": True},
+                            world={"town": "Muldraugh", "hour": 22, "language": "TR"},
+                            player={"key": "sp:0", "tradeable": [{"name": "Konserve Fasulye", "count": 3}]})
+        request = parse_request(data)
+        self.assertEqual((request.standoff, request.opening, request.language, request.stance),
+                         (True, True, "TR", "hostile"))
+        system, user = build_messages(request, memories=[], history=[], trust=0, fear=0)
+        self.assertIn("STANDOFF: you and your people are hostile to the stranger", system["content"])
+        self.assertIn("the stranger is an enemy", system["content"])
+        self.assertTrue(user["content"].endswith("You call out to them first.) Speak Turkish."))
+        self.assertNotIn(STRANGER_SAYS, user["content"], "nothing from the stranger yet")
+        demand = parse_reply('{"say": "Fasulyeleri bırak.", "intent": "rob", "trade": {"decision": "counter", '
+                             '"npc_offer": [], "npc_wants": ["Konserve Fasulye"]}}', request)
+        self.assertEqual((demand.intent, demand.trade_decision, demand.trade_offer, demand.trade_wants),
+                         ("rob", "counter", (), ("Konserve Fasulye",)),
+                         "tribute: their things, nothing back (the game acts on the trade whatever the intent)")
+        later = parse_request(dict(data, text="Tamam, alın.", standoff={}))
+        self.assertEqual((later.standoff, later.opening), (True, False))
+        _, user = build_messages(later, memories=[], history=[], trust=0, fear=0)
+        self.assertIn(f'{STRANGER_SAYS} "Tamam, alın."', user["content"])
+        self.assertFalse(parse_request(request_data()).standoff)
+
     def test_intent_variants(self):
         for raw, expected in {"hand_over": "give", "Give Item": "give", "drop": "give", "wait": "stay",
                               "join": "follow", "dance": "none"}.items():

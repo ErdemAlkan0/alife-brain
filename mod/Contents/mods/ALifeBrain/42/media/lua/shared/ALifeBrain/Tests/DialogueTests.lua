@@ -336,6 +336,19 @@ ALifeBrain.Tests.suite("Dialogue", {
         end)
     end },
 
+    { "a parley lets a hostile NPC talk, and it may speak first", function(check)
+        run({ stance = "hostile" }, function(env)
+            check.isNil(Dialogue.ask(env.player, env.npc, env.shell, "hi"), "hostile NPCs stay A-Life's otherwise")
+            local id = Dialogue.ask(env.player, env.npc, env.shell, "(narration)", env.view(), nil,
+                { standoff = true, opening = true })
+            check.truthy(id ~= nil)
+            local data = env.requests[1].data
+            check.same(data.standoff, { opening = true })
+            check.equal(data.stance, "hostile")
+            check.equal(type(data.world.language), "string", "the NPC needs to know which language to open in")
+        end)
+    end },
+
     { "puts the trade table in front of the NPC", function(check) run(nil, function(env)
         env.tradeable = { { type = "Base.Beans", name = "Beans", count = 2 } }
         env.playerTradeable = { { type = "Base.Nails", name = "Nails", count = 5 } }
@@ -407,7 +420,9 @@ ALifeBrain.Tests.suite("Dialogue", {
 
     { "an unpaid accept leaves the table as it is", function(check) run(nil, function(env)
         local trade = ALifeBrain.Trade.new(function(entry) return entry end)
-        trade:ask({ type = "Base.Beans", name = "Beans", count = 2 })
+        local beans = { type = "Base.Beans", name = "Beans", count = 2 }
+        trade:ask(beans)
+        trade:ask(beans) -- one more each time
         local view = env.view()
         env.tradeFails = "unpaid"
         Dialogue.ask(env.player, env.npc, env.shell, "give me beans, I'll pay later", view, trade)

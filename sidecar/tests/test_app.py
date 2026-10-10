@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 
 from alifebrain_sidecar.app import Sidecar
+from alifebrain_sidecar.dataset import DatasetStore
 from alifebrain_sidecar.events import EventStore
 from alifebrain_sidecar.files import FileBridge
 from alifebrain_sidecar.protocol import CLAIMED_FILE, REQ_FILE, RES_FILE
@@ -124,6 +125,24 @@ class RequestHandlingTests(SidecarTestCase):
         self.assertEqual(records[0]["event"]["kind"], "npc_hit")
         self.assertEqual(records[0]["ts"], self.clock.now - 60_000, "old backlog events are kept")
         self.assertEqual(records[0]["receivedTs"], self.clock.now)
+
+    def test_decision_samples_go_to_the_dataset_not_the_event_log(self):
+        self.send("event", {"kind": "decision_samples", "schema": 1, "rows": []})
+        self.sidecar.step()
+        _, responses = self.read_res()
+        self.assertEqual(responses[0]["error"], "dataset_unavailable", "this sidecar has no dataset store")
+
+        self.sidecar.dataset = DatasetStore(Path(self._tmp.name) / "data" / "dataset", day=lambda: "d")
+        hello = self.send("hello", {})
+        self.send("event", {"kind": "decision_samples", "schema": 1, "names": ["a", "b"],
+                            "rows": [{"d": "decision", "a": "regroup", "o": [1, 0], "m": ["regroup"]}]})
+        self.sidecar.step()
+        _, responses = self.read_res()
+        features = next(r for r in responses if r["re"] == hello)["data"]["features"]
+        self.assertIn("dataset", features)
+        self.assertEqual(self.sidecar.stats["samples"], 1)
+        self.assertFalse(self.events_path.exists(), "samples are training data, not memories")
+        self.assertTrue((Path(self._tmp.name) / "data" / "dataset" / "decisions-d.jsonl").exists())
 
     def test_event_without_kind_is_rejected(self):
         self.send("event", {"npc": {}})

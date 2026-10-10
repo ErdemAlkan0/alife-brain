@@ -13,6 +13,7 @@ from pathlib import Path
 from . import __version__
 from .app import Sidecar
 from .config import PROVIDERS, load_settings
+from .dataset import DatasetStore
 from .events import EventStore
 from .files import FileBridge
 from .llm import LLMError, build_provider
@@ -107,7 +108,8 @@ def main(argv: list[str] | None = None) -> int:
 
         memory = MemoryStore(args.data_dir / "memory.sqlite3")
         sidecar = Sidecar(FileBridge(args.lua_dir), EventStore(args.data_dir / "events.jsonl"), memory=memory,
-                          provider=provider, dialogue=settings.dialogue,
+                          dataset=DatasetStore(args.data_dir / "dataset"), provider=provider,
+                          dialogue=settings.dialogue,
                           health_interval_ms=settings.player2.health_interval_s * 1000)
         log.info("sidecar %s sid=%s provider=%s watching %s, data in %s", __version__, sidecar.sid,
                  settings.provider, args.lua_dir, args.data_dir)

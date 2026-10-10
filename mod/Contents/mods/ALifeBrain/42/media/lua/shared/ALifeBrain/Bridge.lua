@@ -107,7 +107,8 @@ function Bridge:reset()
     self.ackSentRseq = 0
     self.lastAckAtMs = -math.huge
     self.lastPollAtMs = -math.huge
-    self.metrics = { sent = 0, received = 0, timeouts = 0, dropped = 0, badLines = 0, writeFailures = 0 }
+    self.lastGoodPollMs = nil
+    self.metrics = { sent = 0, received = 0, timeouts = 0, dropped = 0, badLines = 0, writeFailures = 0, badReads = 0 }
 end
 
 function Bridge:now() return self.adapters.nowMs() end
@@ -289,15 +290,28 @@ function Bridge:handleMessage(message)
 end
 
 -- Reads the response file. Returns true when the sidecar looks alive.
+-- A read that finds nothing usable is not proof the sidecar is gone: on Windows the file is
+-- locked for a moment while the sidecar swaps it in (seen in play: "being used by another
+-- process"), and going offline fails every pending request. Only a last good status older
+-- than the alive timeout counts as gone.
+function Bridge:graceAfterBadRead(now)
+    return self.online == true and self.lastGoodPollMs ~= nil
+        and now - self.lastGoodPollMs <= self.settings.aliveTimeoutMs
+end
+
 function Bridge:poll(now)
     local lines = self.adapters.readLines(Bridge.RES_FILE)
-    if lines == nil or #lines == 0 then return false end
+    if lines == nil or #lines == 0 then
+        self.metrics.badReads = (self.metrics.badReads or 0) + 1
+        return self:graceAfterBadRead(now)
+    end
     local status = Json.decode(lines[1])
     if type(status) ~= "table" or status.type ~= "status" or status.v ~= Bridge.PROTOCOL then
         self.metrics.badLines = self.metrics.badLines + 1
-        return false
+        return self:graceAfterBadRead(now)
     end
     local alive = self:applyStatus(status, now)
+    if alive then self.lastGoodPollMs = now end
     for index = 2, #lines do
         local message = Json.decode(lines[index])
         if type(message) == "table" then

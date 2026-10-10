@@ -73,6 +73,11 @@ class DialogueRequest:
     inventory: dict[str, int] = field(default_factory=dict)
     inventory_items: dict[str, list[str]] = field(default_factory=dict)
     following: bool = False
+    # Parley (Parley.lua): a hostile NPC stopped the stranger before shooting. opening = the NPC
+    # speaks first; text is then a narration, not the stranger's words.
+    standoff: bool = False
+    opening: bool = False
+    language: str | None = None  # the game's language code, e.g. "TR"
     # Trade window: everything the NPC could trade, what the stranger could trade (the NPC may
     # ask for it), and what is on the table right now.
     tradeable: tuple["TradeLine", ...] = ()
@@ -242,12 +247,31 @@ def parse_request(data: Any) -> DialogueRequest:
         inventory=_inventory(npc_data.get("inventory")),
         inventory_items=_inventory_items(npc_data.get("inventoryItems")),
         following=npc_data.get("following") is True,
+        standoff=isinstance(data.get("standoff"), dict),
+        opening=isinstance(data.get("standoff"), dict) and data["standoff"].get("opening") is True,
+        language=_text(world.get("language"), 8),
         tradeable=_trade_lines(npc_data.get("tradeable"), MAX_TRADEABLE),
         player_tradeable=_trade_lines(player.get("tradeable"), MAX_TRADEABLE),
         trade_open=trade is not None,
         trade_offer=_trade_lines(trade.get("playerOffer"), MAX_TRADE_LINES) if trade else (),
         trade_ask=_trade_lines(trade.get("npcSide"), MAX_TRADE_LINES) if trade else (),
     )
+
+
+LANGUAGES = {"TR": "Turkish", "EN": "English", "DE": "German", "FR": "French", "ES": "Spanish", "IT": "Italian",
+             "RU": "Russian", "PL": "Polish", "PT": "Portuguese", "PTBR": "Brazilian Portuguese", "CN": "Chinese",
+             "JP": "Japanese", "KO": "Korean", "UA": "Ukrainian", "CS": "Czech", "NL": "Dutch", "HU": "Hungarian"}
+
+STANDOFF_RULES = (
+    "- STANDOFF: you and your people are hostile to the stranger. You have them covered and stopped them before "
+    "shooting. Say what you want, short and menacing: demand tribute from what they carry (trade: decision "
+    "counter, npc_wants = their things you want, npc_offer empty; the game takes it when they hand it over), or "
+    "order them away. intent attack = you open fire now and the talk is over. Your patience is short: the first "
+    "time they refuse, give them one last warning; if they refuse again, threaten you, insult you, lie badly or "
+    "stall, attack. Look at the conversation so far: if you already warned them once, do not warn again. intent "
+    "leave = you let them go; use it once they paid or clearly back off. You are not their friend and you do not "
+    "hand anything out."
+)
 
 
 def _sentence(text: str) -> str:
@@ -296,7 +320,7 @@ def build_messages(request: DialogueRequest, *, memories: list[Memory], history:
     system = [
         " ".join(identity),
         "You are talking to another survivor you only know as \"the stranger\".",
-        f"How you see the stranger: {STANCES[request.stance]}. "
+        f"How you see the stranger: {STANCES['hostile' if request.standoff else request.stance]}. "
         f"Your trust in them is {trust} and your fear of them is {fear} (both from -100 to 100).",
     ]
     situation = _situation(request)
@@ -364,12 +388,20 @@ def build_messages(request: DialogueRequest, *, memories: list[Memory], history:
         "  item: only with intent give, otherwise null."
     )
 
+    if request.standoff:
+        system.append(STANDOFF_RULES.strip())
+
     user = []
     if history:
         speakers = {"player": "The stranger: ", "npc": "You: ", "system": "(What actually happened) "}
         lines = [speakers.get(speaker, "") + text for speaker, text in history]
         user.append("Conversation so far:\n" + "\n".join(lines))
-    user.append(f"{STRANGER_SAYS} \"{request.text}\"")
+    if request.opening:
+        # The NPC speaks first; there is nothing from the stranger yet to copy the language from.
+        language = LANGUAGES.get((request.language or "").upper())
+        user.append(request.text + (f" Speak {language}." if language else ""))
+    else:
+        user.append(f"{STRANGER_SAYS} \"{request.text}\"")
     return [{"role": "system", "content": "\n\n".join(system)}, {"role": "user", "content": "\n\n".join(user)}]
 
 

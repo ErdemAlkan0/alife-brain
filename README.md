@@ -11,9 +11,11 @@ mod/                      Zomboid/Workshop/ALifeBrain düzeni (workshop.txt + Co
   Contents/mods/ALifeBrain/
     common/               B42'nin istediği sürümden bağımsız klasör
     42/mod.info           require=\ProjectALifeNPCs
-    42/media/lua/shared/ALifeBrain/   Json, Bridge, ALifeBrainHooks (A-Life'a dokunan her şey), Tests/
-    42/media/lua/client/ALifeBrain/   ALifeBrainMain (başlatma, ping), EventLog
+    42/media/lua/shared/ALifeBrain/   Json, Bridge, ALifeBrainHooks (A-Life'a dokunan her şey), Dialogue, Trade,
+                                      Text, Features + Policy + DecisionLog (3. aşama), PolicyWeights (üretilir), Tests/
+    42/media/lua/client/ALifeBrain/   ALifeBrainMain (başlatma, ping), EventLog, ChatWindow
 sidecar/                  Python sidecar (yalnızca standart kütüphane)
+rl/                       Policy eğitimi (numpy; rl/.venv): davranış klonlama, Lua'ya dışa aktarma
 tests/lua/run_tests.lua   Lua testlerini standart Lua 5.1 / LuaJIT ile koşar
 ```
 
@@ -81,6 +83,21 @@ sidecar kapalıysa `T` A-Life'ın kendi kutusunu açar.
 
 NPC'nin söyledikleri gerçek eylemlere bağlıdır: su / yiyecek / ilaç verebilir (gerçekten envanterinde varsa),
 seni 10 dakika takip edebilir, bekleyebilir ya da konuşmayı bitirebilir; pencerede ne olduğu gri satırla yazar.
+Takip eden NPC yanında kalır: senden 8 kareden uzak zombileri kovalamaz, kalabalık gelince (yakın dövüşte 3, silahla
+6 zombi) ya da ağır yaralıyken geri çekilir; sana yakın tek tük zombilerle A-Life'ın kendi dövüşüyle savaşır.
+Debug konsolunda `ALifeBrain.status()` içindeki `companion` kaç kez geri döndüğünü / çekildiğini gösterir.
+Sen eğilerek ilerlerken takipçi de eğilir, yavaşlar ve koşmaz; ona ya da sana 3 kareden yakın olmayan zombilere
+saldırmaz.
+
+**NPC'ler arası uyarı:** birbirine düşman iki NPC görür görmez ateş etmez: önce "uzak dur", yaklaşırsa ya da uzun
+süre kalırsa son uyarı, sonra çatışma (A-Life'ın fraksiyon replikleriyle). Takipçin uyarılırsa senin yanına çekilir.
+
+**Pazarlık (düşman NPC'ler):** sidecar açıkken seni gören düşman bir NPC ateş etmek yerine durur, seslenir ve sohbet
+penceresi kendiliğinden açılır; NPC önce konuşur (haraç ister ya da tehdit eder). Konuşurken ekibi ateş etmez.
+Haracı takas masasından verirsen (yanına yürüyüp "Kabul et") ya da seni gönderirse bir süre rahat bırakılırsın.
+Pencereyi kapatırsan, ekipten birine vurursan, 45 saniye susarsan ya da NPC vazgeçerse çatışma başlar; çok
+uzaklaşırsan pazarlık biter. Daha önce saldırdığın ya da kendi soygun sistemiyle seni soyan ekipler A-Life gibi
+davranır. `ALifeBrain.status()` içinde `parley` ve `standoff` sayaçları var.
 Sahte sağlayıcıda anahtar kelimeler: "su" / "water", "yemek" / "food", "takip" / "follow", "bekle" / "wait",
 "hoşça kal" / "bye".
 
@@ -97,3 +114,30 @@ sağlayıcı masada bir şey varsa kabul eder, "teklif" / "offer" deyince kendi 
 
 Sidecar yoksa, LLM hata verirse, NPC çatışmadaysa ya da düşmansa A-Life'ın kendi replikleri kullanılır.
 Şimdilik yalnızca tek oyunculu.
+
+## Davranış klonlama (3. aşama)
+
+Amaç: önce A-Life'ın kendi kararlarını taklit eden bir policy (sonra PPO ile geliştirilecek).
+
+1. **Veri toplama:** sidecar açıkken oyna. Mod A-Life'ın her kararını izler (değiştirmez): hangi modülü seçti
+   (`regroup`, `orders`, `flee` ... ya da `default`) ve NPC ne görüyordu (43 özellik: sağlık, mermi, tehdit,
+   yakındaki zombi/squad, oyuncu ve tutum, saat, emir, LLM güven/korku ...). Kayıtlar
+   `%LOCALAPPDATA%\ALifeBrain\dataset\decisions-<tarih>.jsonl` dosyasına gider. Farklı durumlar ne kadar çeşitliyse
+   o kadar iyi: dost ve düşman NPC'ler, gece/gündüz, zombi kalabalığı, takip emri, çatışma.
+   Debug konsolunda `ALifeBrain.status()` (`decisions.sent`) ve `ALifeBrain.policy()` (en sık seçimler).
+2. **Eğitim** (bir kez: `py -3.12 -m venv rl\.venv` ve `rl\.venv\Scripts\python -m pip install -r rl\requirements.txt`):
+
+   ```bash
+   rl\run-bc.cmd
+   ```
+
+   Her zincir (`decision`, `response`) için en az 300 karar gerekir. Doğrulama kümesi eğitimde hiç görülmemiş
+   NPC'lerden oluşur; çıktı doğruluğu "hep en sık seçimi yap" tabanıyla birlikte yazar. Sonuç
+   `mod/.../ALifeBrain/PolicyWeights.lua` dosyasına yazılır (`--dry-run` yalnızca raporlar). Bir modülün hatalı
+   çalıştığı döneme ait kararlar `--exclude <eylem>` ile dışarıda bırakılır (ör. 2026-10-10'daki donma için
+   `--exclude alifeBrainStandoff`).
+3. **Gölge modu:** oyunu yeniden başlat. Policy her örneklenen kararda kendi seçimini yapar ama **uygulamaz**;
+   `ALifeBrain.policy()` A-Life ile ne kadar aynı seçtiğini gösterir. Kontrolü devralması 4./5. aşamada.
+
+Testler: `rl\.venv\Scripts\python -m unittest discover rl\tests` (rl klasöründen: `.venv\Scripts\python -m unittest
+discover tests`).

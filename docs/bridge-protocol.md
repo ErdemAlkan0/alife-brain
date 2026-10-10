@@ -34,8 +34,9 @@ Bütün satırlar **ASCII** JSON'dur (ASCII dışı karakterler `\uXXXX`), bu y�
   başka bir şey yoksa en fazla saniyede bir ayrı bir `ack` mesajı gider.
 - `type` değerleri (v1): `hello`, `ping`, `event`, `dialogue`, `ack`. `event` ve `ack` için cevap satırı yazılmaz
   (`event` hatalıysa yazılır).
-- `hello` cevabı `features` listesi döner (`ping`, `event`, sağlayıcı ve hafıza hazırsa `dialogue`); Lua diyalog
-  kancasını yalnızca `dialogue` varsa kullanır.
+- `hello` cevabı `features` listesi döner (`ping`, `event`, `dataset`, hafıza varsa `history`, sağlayıcı ve hafıza
+  hazırsa `dialogue`, `actions`); Lua diyalog kancasını yalnızca `dialogue`, karar örneklemesini yalnızca `dataset`
+  varsa kullanır.
 
 ### `dialogue` (2. aşama)
 
@@ -56,6 +57,12 @@ sayılır) ve `npc.following` (NPC şu an bu oyuncuyu takip ediyor mu) gelir.
 Cevap `data`: `{"say": "...", "intent": "none|give|follow|stay|leave|trade|warn|attack|rob|give_info",
 "item": "water|food|medicine|null", "trustDelta": 0, "fearDelta": 0, "trust": 0, "fear": 0}`. `item` yalnızca
 `give` ile gelir.
+
+İstekte `world.language` oyunun dil kodudur (`TR`, `EN` ...). Pazarlıkta (`Parley.lua`) `standoff: {"opening": bool}`
+gelir: NPC düşmandır ve oyuncuyu ateş etmeden durdurmuştur. `opening = true` ise NPC ilk konuşur; `text` oyuncunun
+sözü değil bir anlatımdır (hafızaya oyuncu satırı olarak yazılmaz, prompt'a dil adıyla eklenir). Pazarlıkta
+`intent attack` çatışmayı, `intent leave` oyuncuyu bırakmayı başlatır; haraç `trade` (`decision: counter`,
+`npcWants`, boş `npcOffer`) ile istenir.
 
 #### Takas alanları
 
@@ -81,6 +88,24 @@ adını andığı eşyası istenir.
 İstek `data`: `{"uid": "...", "playerKey": "sp:0", "limit": 30}`. Cevap: `{"uid", "name", "trust", "fear",
 "turns": [{"speaker": "player|npc|system", "text": "...", "ts": 0}]}` (eskiden yeniye). `system` satırları oyunda
 gerçekte olanlardır (ör. "Henry handed over Water Bottle.").
+
+### `decision_samples` (3. aşama, davranış klonlama verisi)
+
+`event` olarak gelir (`DecisionLog.lua`), sidecar `hello` cevabında `dataset` özelliğini bildirdiyse gönderilir;
+hafızaya ve `events.jsonl`'e girmez:
+
+```json
+{"kind": "decision_samples", "schema": 1, "names": ["health", "..."],
+ "rows": [{"d": "decision", "a": "regroup", "o": [1, 0, 0.5, "..."], "m": ["orders", "regroup"],
+           "u": "palife:...", "f": "alife_church_volunteers", "p": "...", "t": 1791496029466, "pa": "regroup"}]}
+```
+
+- `d`: A-Life zinciri (`decision` tehdit yokken, `response` tehdide), `a`: kazanan modül id'si ya da `default`
+  (A-Life'ın kendi geri düşüşü), `o`: `Features.vector` (3 hane yuvarlanmış), `m`: o NPC'nin o zincirde izinli
+  modülleri, `pa`: gölge modundaki policy'nin seçimi (eğitilmiş ağırlık varsa).
+- `names` her bağlantıda ilk partiyle bir kez gelir. Parti en çok 12 satır (satır sınırının altında kalsın diye).
+- Sidecar geçerli satırları `<veri klasörü>/dataset/decisions-<tarih>.jsonl`, adları `schema-<n>.json` dosyasına yazar.
+  Özellik listesi değişirse `Features.SCHEMA` artırılır; eski şemanın verisi ayrı kalır.
 
 ### `event` türleri
 

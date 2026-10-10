@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import socket
+import time
 import urllib.error
 import urllib.request
 from typing import Any
@@ -23,6 +24,7 @@ class LLMError(Exception):
     def __init__(self, code: str, detail: str = "") -> None:
         super().__init__(f"{code}: {detail}" if detail else code)
         self.code = code
+        self.detail = detail
 
 
 class OpenAICompatibleProvider:
@@ -90,10 +92,23 @@ class Player2Provider(OpenAICompatibleProvider):
         super().__init__(base_url, headers={"player2-game-key": client_id}, json_mode=False, send_sampling=False)
         self.client_id = client_id
 
+    # Player2 now and then turns a request down at once ("user input rejected", HTTP 400) and
+    # takes the very same request a moment later (seen with hostile standoff lines). One retry,
+    # only when the refusal came back fast enough to leave time for it.
+    RETRY_WITHIN_S = 5.0
+
     def chat(self, messages: list[Message], *, max_tokens: int, temperature: float, timeout: float) -> str:
         if not self.client_id:
             raise LLMError("player2_client_id_missing")
-        return super().chat(messages, max_tokens=max_tokens, temperature=temperature, timeout=timeout)
+        started = time.monotonic()
+        try:
+            return super().chat(messages, max_tokens=max_tokens, temperature=temperature, timeout=timeout)
+        except LLMError as error:
+            spent = time.monotonic() - started
+            if error.code != "http_400" or "rejected" not in error.detail or spent > self.RETRY_WITHIN_S:
+                raise
+            log.info("Player2 rejected the request (%s); retrying once", error.detail[:80])
+            return super().chat(messages, max_tokens=max_tokens, temperature=temperature, timeout=max(5.0, timeout - spent))
 
     def health(self, timeout: float = 3.0) -> Any:
         return self._request("GET", "/health", None, timeout)

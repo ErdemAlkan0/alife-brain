@@ -92,9 +92,13 @@ end
 
 -- Sends one line to the NPC. view (optional) gets view:onReply(say, reply, outcome),
 -- view:onFallback(reason, alifeSaid) and view:onDropped(). trade (optional, ALifeBrain.Trade)
--- puts the trade table in front of the NPC. Returns the request id, or nil and
--- "offline" | "unsupported" | "combat" | "hostile" | "busy" | a bridge reason.
-function Dialogue.ask(player, record, shell, text, view, trade)
+-- puts the trade table in front of the NPC. options (optional): standoff = true for a parley
+-- with a hostile NPC (Parley.lua; hostile NPCs are otherwise left to A-Life), opening = true
+-- when the NPC speaks first (text is then a narration for the LLM, not the player's words).
+-- Returns the request id, or nil and "offline" | "unsupported" | "combat" | "hostile" |
+-- "busy" | a bridge reason.
+function Dialogue.ask(player, record, shell, text, view, trade, options)
+    options = type(options) == "table" and options or {}
     local d = deps()
     local bridge, hooks = d.bridge, d.hooks
     if Dialogue.settings.enabled ~= true or bridge == nil or not bridge:isOnline() then return nil, "offline" end
@@ -102,7 +106,7 @@ function Dialogue.ask(player, record, shell, text, view, trade)
     if record == nil or shell == nil then return nil, "gone" end
     if hooks.inCombat(record) then return nil, "combat" end
     local stance = hooks.stance(record, player)
-    if stance == "hostile" then return nil, "hostile" end
+    if stance == "hostile" and options.standoff ~= true then return nil, "hostile" end
     local uid = record.uid
     if Dialogue.pending[uid] ~= nil then
         Dialogue.metrics.busy = Dialogue.metrics.busy + 1
@@ -112,6 +116,9 @@ function Dialogue.ask(player, record, shell, text, view, trade)
     local request = hooks.dialogueContext(record, shell, player, hooks.nowMs())
     request.text = text
     request.stance = stance
+    if options.standoff == true then request.standoff = { opening = options.opening == true } end
+    request.world = request.world or {}
+    request.world.language = ALifeBrain.Text ~= nil and ALifeBrain.Text.language() or nil
     request.npc = request.npc or { uid = uid }
     local counts, names = hooks.inventorySummary(shell)
     request.npc.inventory = counts
@@ -203,6 +210,8 @@ function Dialogue.executeTrade(player, record, shell, trade)
         end
     end
     Dialogue.report(player, record, shell, outcome)
+    -- In a parley, handing something over is paying the tribute.
+    if ALifeBrain.Parley ~= nil then pcall(ALifeBrain.Parley.onTrade, record.uid, outcome, deps().hooks.nowMs()) end
     return outcome
 end
 
@@ -317,6 +326,8 @@ function Dialogue.finish(uid, player, text, ok, reply)
     local mind = Dialogue.remember(uid, reply, now)
     local outcome = Dialogue.act(player, record, shell, mind, reply, now, entry)
     Dialogue.metrics.answered = Dialogue.metrics.answered + 1
+    -- A parley ends when the NPC opens fire (intent attack) or sends the player off (leave).
+    if ALifeBrain.Parley ~= nil then pcall(ALifeBrain.Parley.onReply, uid, mind, now) end
     if view ~= nil then
         pcall(view.onReply, view, say, reply, outcome)
     elseif outcome ~= nil and ALifeBrain.Text ~= nil then

@@ -20,6 +20,7 @@ require "ALifeBrain/Text"
 require "ALifeBrain/Trade"
 require "ALifeBrain/ALifeBrainHooks"
 require "ALifeBrain/Dialogue"
+require "ALifeBrain/Parley"
 
 ALifeBrain = ALifeBrain or {}
 
@@ -419,7 +420,8 @@ function Window:sendText(text)
     if self.closed or self.thinkingSince ~= nil then return false end
     local player, record = self.player, Hooks.readRecord(self.uid)
     local vars = { name = plain(self.npcName) }
-    local id, reason = Dialogue.ask(player, record, self.shell, text, self, self.trade)
+    local options = self.parley and { standoff = true } or nil
+    local id, reason = Dialogue.ask(player, record, self.shell, text, self, self.trade, options)
     if id == nil then
         if reason == "offline" then self:say("offline")
         elseif reason == "unsupported" then self:say("unavailable")
@@ -429,6 +431,20 @@ function Window:sendText(text)
     end
     self:append("player", text)
     pcall(function() player:Say(text) end)
+    self:setThinking(true)
+    if self.parley then ALifeBrain.Parley.onPlayerLine(self.uid, nowMs()) end
+    return true
+end
+
+-- In a parley the NPC speaks first: the request text is a narration for the LLM, and nothing
+-- is said by the player.
+Chat.PARLEY_OPENING = "(The stranger has just walked into your sights. You call out to them first.)"
+
+function Window:sendOpening()
+    if self.closed then return false end
+    local id = Dialogue.ask(self.player, Hooks.readRecord(self.uid), self.shell, Chat.PARLEY_OPENING, self, self.trade,
+        { standoff = true, opening = true })
+    if id == nil then return false end
     self:setThinking(true)
     return true
 end
@@ -635,7 +651,8 @@ function Window:update()
         self.closeAtMs = now + Chat.settings.closeDelayMs
         return
     end
-    if not Hooks.withinReach(player, self.shell, Chat.settings.reachTiles) then
+    -- (A parley keeps its distance; Parley.tick ends it when the player gets away.)
+    if not self.parley and not Hooks.withinReach(player, self.shell, Chat.settings.reachTiles) then
         self:say("closed_far", { name = plain(self.npcName) })
         self.closeAtMs = now + Chat.settings.closeDelayMs
         return
@@ -652,6 +669,8 @@ end
 function Window:close()
     if self.closed then return end
     self.closed = true
+    -- Walking out of a parley is a refusal: the crew opens fire.
+    if self.parley and not self.parleyEnded then ALifeBrain.Parley.onWindowClosed(self.uid, nowMs()) end
     local record = Hooks.readRecord(self.uid)
     if record ~= nil and self.player ~= nil then
         Hooks.release(record, self.player)
@@ -731,6 +750,32 @@ function Chat.open(player, row, fromKey)
     if fromKey then pcall(function() window.entry:ignoreFirstInput() end) end
     return window
 end
+
+-- Parley (Parley.lua): a hostile NPC called out to the player; the window opens by itself and
+-- the NPC speaks first.
+function Chat.openParley(parley)
+    local record = Hooks.readRecord(parley.uid)
+    if record == nil then return nil end
+    local info = Hooks.describe(parley.shell) or {}
+    local window = Chat.open(parley.player, { uid = parley.uid, shell = parley.shell, record = record, name = info.name,
+        factionName = info.factionName })
+    window.parley = true
+    window:say("parley_start", { name = plain(window.npcName) })
+    window:sendOpening()
+    return window
+end
+
+-- How the parley ended, in the window, which then closes.
+function Chat.onParleyEnd(parley, outcome)
+    local window = Chat.instance
+    if window == nil or window.closed or window.uid ~= parley.uid then return end
+    window.parleyEnded = true
+    window:say("parley_" .. tostring(outcome), { name = plain(window.npcName) })
+    window.closeAtMs = nowMs() + (outcome == "fight" and 1200 or Chat.settings.closeDelayMs + 1500)
+end
+
+ALifeBrain.Parley.onOpen = Chat.openParley
+ALifeBrain.Parley.onEnd = Chat.onParleyEnd
 
 -- The NPC the player is most likely addressing: in front (A-Life's 60 degree cone) first,
 -- then the nearest. Hostile NPCs are skipped.

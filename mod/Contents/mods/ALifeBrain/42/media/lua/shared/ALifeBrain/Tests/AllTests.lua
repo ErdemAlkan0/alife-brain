@@ -5,5 +5,7 @@ require "ALifeBrain/Tests/JsonTests"
 require "ALifeBrain/Tests/BridgeTests"
 require "ALifeBrain/Tests/DialogueTests"
 require "ALifeBrain/Tests/TradeTests"
+require "ALifeBrain/Tests/BehaviorTests"
+require "ALifeBrain/Tests/ParleyTests"
 
 return ALifeBrain.Tests
