@@ -85,6 +85,17 @@ PZ Lua addon ⇄ (JSON satırları, dosya köprüsü) ⇄ Python sidecar ⇄ LLM
 - trust / fear / goal girdileri eğitimde rastgele verilir → tek policy, yeniden eğitim olmadan diyalogla ayarlanabilir.
 - Ödül: hayatta kalma + görev başarısı, squad kayıplarına ceza.
 - Dışa aktarma: MLP ağırlıkları → Lua tablosu.
+- Uygulandı (4. aşama): `rl/alifebrain_rl/sim.py` (`SquadEnv`; gözlem `features.py` = `Features.lua` şema 1, eylemler
+  iki zincirin A-Life modül id'leri, geçersiz eylem = zincirin `default`'u + küçük ceza; çatışma A-Life
+  `Offline/ALifeOfflineCombat.lua` güç modeli; güven/korku/hedef ödülü değiştirir: korku = oyuncunun tehlikesi, onun
+  gücünü artırır; her yeni tehdit hayatta kalma ağırlığıyla ek bedel, temkinli hedef bu yüzden belaya girmez; oyuncu
+  yerinin çevresinde kalır), `ppo.py` (SB3 PPO, 64-64 tanh;
+  tek gövde iki ağ olarak dışa aktarılır; `--install` moda yazar). `rl/.venv`: numpy + torch CPU + SB3 + Gymnasium.
+  Kalibrasyon hedefi: A-Life benzeri kural (hep savaş, yalnızca çok yaralıyken kaç) bölümlerin ~%30'unda ölür.
+  Sonuç (3M adım, n_steps 1024, batch 512, target_kl 0.02; 2 tohum tutarlı): PPO ölüm %8–14 (kural %38); güven >
+  +0.6 takip %93–95 (< +0.4: %18–43); yalnızken toplama hedef > +0.5 %90–95, < −0.5 %5–11; 4+ zombi ve can < 0.4 →
+  kaç %99. Zayıf kalan: korkulan silahlı oyuncuyu uyarma (ilk seçimde %38–47, bölüm boyunca ~%2; oyunda da nadir:
+  kararların %4'ünde oyuncu 10 karenin içinde). `ppo.py` raporu: probe'lar (ilk seçim) + `HABITS` (bölüm boyunca).
 
 ## Yol haritası
 

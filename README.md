@@ -139,5 +139,31 @@ Amaç: önce A-Life'ın kendi kararlarını taklit eden bir policy (sonra PPO il
 3. **Gölge modu:** oyunu yeniden başlat. Policy her örneklenen kararda kendi seçimini yapar ama **uygulamaz**;
    `ALifeBrain.policy()` A-Life ile ne kadar aynı seçtiğini gösterir. Kontrolü devralması 4./5. aşamada.
 
+## PPO (4. aşama)
+
+`rl/alifebrain_rl/sim.py`: A-Life'ın ekran dışı squad simülasyonuna benzeyen bir Gymnasium ortamı. Bir NPC ve
+squad'ı sakin anlardan (`decision` zinciri: devriye, toplama, toparlanma, dinlenme, emir, uyarma, soygun) ve
+tehditlerden (`response` zinciri: savaş, kaç, panik, destek çağır, oyuncuya çekil, NPC'yi uyar, pazarlık) geçer;
+çatışmalar A-Life'ın çevrimdışı güç modeliyle çözülür. Gözlem oyunun `Features.lua` vektörünün aynısı
+(`features.py`), eylemler A-Life modül id'leri: eğitilen ağ oyunda değişmeden çalışır. Güven / korku / hedef her
+bölümde rastgele çekilir ve neyin kazandırdığını değiştirir (güvenilen oyuncuyu takip et, onu soyma; korku oyuncunun
+ne kadar tehlikeli olduğunu söyler: korkulan oyuncu daha sert dövüşür, yakındaki silahlı oyuncu uyarılıp uzaklaştırılır;
+hedef −1 temkinli: her yeni tehdit hayatta kalma ağırlığıyla ek bedel ↔ +1 ganimet ve çatışma) → diyalogla ayarlanan
+tek policy. Oyuncu olduğu yerin çevresinde kalır (uyarılırsa çoğunlukla uzaklaşır), yani yakın karşılaşmalar sürer.
+
+Kurulum (bir kez): `rl\.venv\Scripts\python -m pip install -r rl\requirements-ppo.txt --extra-index-url
+https://download.pytorch.org/whl/cpu` (torch CPU, Stable-Baselines3, Gymnasium).
+
+```bash
+rl\run-ppo.cmd
+```
+
+Varsayılan 3 milyon adım CPU'da ~20 dakika sürer (`--timesteps` ile değişir; 1 milyonda bazı tohumlar "her yerde
+topla"ya çöküyordu). Çıktı: PPO ile iki temel çizginin (A-Life benzeri kural, rastgele) getiri /
+ölüm / squad kaybı karşılaştırması, güven, korku, hedef değişince ilk seçimin nasıl değiştiği ve bütün bölümler boyunca
+alışkanlıklar (ör. yalnızken toplama oranı hedef > +0.5 ve < −0.5 iken; köşeli parantezde A-Life benzeri kural). Ağırlıklar
+`rl\out\PolicyWeights.ppo.lua`'ya yazılır; `--install` moddaki `PolicyWeights.lua`'ya da yazar (oyunda gölge modu).
+Simülasyondaki bütün sayılar tasarım tercihidir (`SETTINGS`), ölçüm değil.
+
 Testler: `rl\.venv\Scripts\python -m unittest discover rl\tests` (rl klasöründen: `.venv\Scripts\python -m unittest
 discover tests`).

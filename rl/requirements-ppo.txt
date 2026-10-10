@@ -1,0 +1,5 @@
+# Phase 4 (PPO). torch from the CPU index: pip install -r requirements-ppo.txt --extra-index-url https://download.pytorch.org/whl/cpu
+-r requirements.txt
+torch>=2.2
+stable-baselines3>=2.3
+gymnasium>=0.29
