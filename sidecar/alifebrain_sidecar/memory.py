@@ -10,6 +10,10 @@ from pathlib import Path
 
 SCOPES = ("personal", "squad", "faction")
 MOOD_LIMIT = 100
+# The NPC's drive (the policy's goal input, -100 lie low .. 100 go out for supplies and risks):
+# one per NPC, stirred by conversations and settling back to 0 (the game uses the same half-life).
+GOAL_LIMIT = 100
+GOAL_HALF_LIFE_MS = 30 * 60 * 1000
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS npcs (
@@ -21,6 +25,9 @@ CREATE TABLE IF NOT EXISTS moods (
     uid TEXT NOT NULL, player_key TEXT NOT NULL,
     trust INTEGER NOT NULL DEFAULT 0, fear INTEGER NOT NULL DEFAULT 0, updated INTEGER NOT NULL,
     PRIMARY KEY (uid, player_key)
+);
+CREATE TABLE IF NOT EXISTS drives (
+    uid TEXT PRIMARY KEY, goal REAL NOT NULL DEFAULT 0, updated INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS memories (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -40,6 +47,11 @@ _WORD = re.compile(r"[^\W\d_]{3,}", re.UNICODE)
 
 def _words(text: str) -> set[str]:
     return {word.lower() for word in _WORD.findall(text or "")}
+
+
+def settle(goal: float, elapsed_ms: int) -> float:
+    """A drive halves every GOAL_HALF_LIFE_MS (Dialogue.goalNow in the game does the same)."""
+    return goal * 0.5 ** (max(0, elapsed_ms) / GOAL_HALF_LIFE_MS)
 
 
 @dataclass(frozen=True)
@@ -110,6 +122,39 @@ class MemoryStore:
         )
         self.db.commit()
         return trust, fear
+
+    def _drive(self, uid: str, now: int) -> float:
+        row = self.db.execute("SELECT goal, updated FROM drives WHERE uid = ?", (uid,)).fetchone()
+        if not row:
+            return 0.0
+        return settle(row[0], now - row[1])
+
+    def drive(self, uid: str, now: int) -> int:
+        """The NPC's goal now (-100..100), settled toward 0 since it was last stirred."""
+        return round(self._drive(uid, now))
+
+    def shift_drive(self, uid: str, delta: int, ts: int) -> int:
+        goal = max(-GOAL_LIMIT, min(GOAL_LIMIT, self._drive(uid, ts) + int(delta)))
+        self.db.execute(
+            """INSERT INTO drives (uid, goal, updated) VALUES (?, ?, ?)
+               ON CONFLICT(uid) DO UPDATE SET goal = excluded.goal, updated = excluded.updated""",
+            (uid, goal, ts),
+        )
+        self.db.commit()
+        return round(goal)
+
+    def moods(self, uids: list[str], player_key: str, now: int) -> list[dict]:
+        """trust / fear toward the player and goal for each NPC that has any of them stored."""
+        out = []
+        for uid in uids:
+            mood = self.db.execute("SELECT trust, fear FROM moods WHERE uid = ? AND player_key = ?",
+                                   (uid, player_key)).fetchone()
+            drive = self.db.execute("SELECT 1 FROM drives WHERE uid = ?", (uid,)).fetchone()
+            if mood is None and drive is None:
+                continue
+            trust, fear = mood if mood else (0, 0)
+            out.append({"uid": uid, "trust": trust, "fear": fear, "goal": self.drive(uid, now)})
+        return out
 
     # -- memories ---------------------------------------------------------------
 

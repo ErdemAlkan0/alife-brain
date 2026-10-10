@@ -67,6 +67,13 @@ function Parley.isActive(uid)
     return Parley.active ~= nil and (uid == nil or Parley.active.uid == uid)
 end
 
+-- True while this NPC calls out or holds its fire with its crew.
+function Parley.involves(uid)
+    local active = Parley.active
+    if active == nil then return false end
+    return active.uid == uid or (type(active.crew) == "table" and active.crew[uid] ~= nil and active.crew[uid] ~= false)
+end
+
 -- "hold" when this NPC should hold its fire (it calls out, or its crew is talking), nil to
 -- leave the fight to A-Life.
 function Parley.consider(actor, shell, player, now)

@@ -32,11 +32,11 @@ Bütün satırlar **ASCII** JSON'dur (ASCII dışı karakterler `\uXXXX`), bu y�
 - `ts`: Lua'nın `getTimestampMs()` değeri (duvar saati, ms).
 - `ack` (isteğe bağlı): Lua'nın o sidecar örneğinden (`sid`) işlediği en büyük `rseq`. Her mesaja eklenir; gönderilecek
   başka bir şey yoksa en fazla saniyede bir ayrı bir `ack` mesajı gider.
-- `type` değerleri (v1): `hello`, `ping`, `event`, `dialogue`, `ack`. `event` ve `ack` için cevap satırı yazılmaz
+- `type` değerleri (v1): `hello`, `ping`, `event`, `dialogue`, `history`, `moods`, `ack`. `event` ve `ack` için cevap satırı yazılmaz
   (`event` hatalıysa yazılır).
-- `hello` cevabı `features` listesi döner (`ping`, `event`, `dataset`, hafıza varsa `history`, sağlayıcı ve hafıza
-  hazırsa `dialogue`, `actions`); Lua diyalog kancasını yalnızca `dialogue`, karar örneklemesini yalnızca `dataset`
-  varsa kullanır.
+- `hello` cevabı `features` listesi döner (`ping`, `event`, `dataset`, hafıza varsa `history` ve `moods`, sağlayıcı ve
+  hafıza hazırsa `dialogue`, `actions`); Lua diyalog kancasını yalnızca `dialogue`, karar örneklemesini yalnızca
+  `dataset`, kayıtlı ruh hali isteğini yalnızca `moods` varsa kullanır.
 
 ### `dialogue` (2. aşama)
 
@@ -55,8 +55,11 @@ Bütün satırlar **ASCII** JSON'dur (ASCII dışı karakterler `\uXXXX`), bu y�
 sayılır) ve `npc.following` (NPC şu an bu oyuncuyu takip ediyor mu) gelir.
 
 Cevap `data`: `{"say": "...", "intent": "none|give|follow|stay|leave|trade|warn|attack|rob|give_info",
-"item": "water|food|medicine|null", "trustDelta": 0, "fearDelta": 0, "trust": 0, "fear": 0}`. `item` yalnızca
-`give` ile gelir.
+"item": "water|food|medicine|null", "trustDelta": 0, "fearDelta": 0, "trust": 0, "fear": 0, "goalDelta": 0,
+"goal": 0}`. `item` yalnızca `give` ile gelir. `goal` NPC'nin atılganlığıdır (5. aşama, policy'nin `goal` girdisi;
+−100 sakin dur, güvende kal ↔ 100 ganimet için dışarı çık, risk al): oyuncu başına değil NPC başına tutulur, LLM her
+cevapta `goal_delta` ile en çok ±25 oynatır, 30 dakikalık yarı ömürle 0'a söner (`memory.GOAL_HALF_LIFE_MS` =
+`Dialogue.GOAL_HALF_LIFE_MS`; değer cevap anındaki hâlidir, oyun kendi saatiyle söndürmeye devam eder).
 
 İstekte `world.language` oyunun dil kodudur (`TR`, `EN` ...). Pazarlıkta (`Parley.lua`) `standoff: {"opening": bool}`
 gelir: NPC düşmandır ve oyuncuyu ateş etmeden durdurmuştur. `opening = true` ise NPC ilk konuşur; `text` oyuncunun
@@ -85,9 +88,18 @@ adını andığı eşyası istenir.
 
 ### `history`
 
-İstek `data`: `{"uid": "...", "playerKey": "sp:0", "limit": 30}`. Cevap: `{"uid", "name", "trust", "fear",
+İstek `data`: `{"uid": "...", "playerKey": "sp:0", "limit": 30}`. Cevap: `{"uid", "name", "trust", "fear", "goal",
 "turns": [{"speaker": "player|npc|system", "text": "...", "ts": 0}]}` (eskiden yeniye). `system` satırları oyunda
 gerçekte olanlardır (ör. "Henry handed over Water Bottle.").
+
+### `moods` (5. aşama)
+
+Policy'nin girdisi için, bu oturumda konuşulmamış NPC'lerin kayıtlı ruh hali (`Moods.lua`). İstek `data`:
+`{"playerKey": "sp:0", "uids": ["palife:...", ...]}` (en çok 32 uid; oyun 24'lük gruplarla, 3 s'de en çok bir
+istek gönderir). Cevap: `{"moods": [{"uid", "trust", "fear", "goal"}], "goalHalfLifeMs": 1800000}`; yalnızca
+sidecar'da bir şeyi kayıtlı NPC'ler listelenir (gerisi 0'dan başlar; oyun onları 5 dakika sonra yeniden sorar).
+Oyun bunları yalnızca elinde olmayan NPC'ler için `Dialogue.minds`'a yazar; bu oturumdaki bir cevap her zaman daha
+yenidir.
 
 ### `decision_samples` (3. aşama, davranış klonlama verisi)
 

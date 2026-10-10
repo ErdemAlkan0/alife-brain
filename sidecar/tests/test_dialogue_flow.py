@@ -182,6 +182,27 @@ class HistoryAndActionTests(FlowTestCase):
         turns = self.responses()[history]["data"]["turns"]
         self.assertEqual([(turn["speaker"], turn["text"]) for turn in turns], [("npc", "Dur orada! Ne taşıyorsun?")])
 
+    def test_talk_of_danger_lowers_the_drive_the_game_reads_back(self):
+        self.send("dialogue", self.talk("Be careful, there is a horde to the east."))
+        self.sidecar.step()
+        self.now += 1000
+        moods = self.send("moods", {"playerKey": "sp:0", "uids": ["u1", "u9", 7]})
+        history = self.send("history", {"uid": "u1", "playerKey": "sp:0"})
+        hello = self.send("hello", {})
+        self.sidecar.step()
+        responses = self.responses()
+        reply = next(r for r in responses.values() if "say" in (r.get("data") or {}))["data"]
+        self.assertEqual((reply["goalDelta"], reply["goal"]), (-25, -25))
+        self.assertEqual(responses[moods]["data"]["moods"], [{"uid": "u1", "trust": 1, "fear": 0, "goal": -25}])
+        self.assertGreater(responses[moods]["data"]["goalHalfLifeMs"], 0)
+        self.assertEqual(responses[history]["data"]["goal"], -25)
+        self.assertIn("moods", responses[hello]["data"]["features"])
+
+    def test_moods_needs_uids_and_player(self):
+        request_id = self.send("moods", {"uids": ["u1"]})
+        self.sidecar.step()
+        self.assertEqual(self.responses()[request_id]["error"], "uids_or_player_missing")
+
     def test_history_needs_uid_and_player(self):
         history_id = self.send("history", {"uid": "u1"})
         self.sidecar.step()

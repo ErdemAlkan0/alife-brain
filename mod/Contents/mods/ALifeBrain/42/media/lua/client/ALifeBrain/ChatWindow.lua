@@ -321,7 +321,9 @@ function Window:prerender()
         self:drawText(stance, x, 84, 0.66, 0.59, 0.39, 1, UIFont.Small)
     end
     if self.trust ~= nil then
-        local mood = T.get("mood", { trust = self.trust, fear = self.fear or 0 })
+        local mind = Dialogue.minds[self.uid]
+        local goal = mind ~= nil and Dialogue.goalNow(mind, nowMs()) or (self.goal or 0)
+        local mood = T.get("mood", { trust = self.trust, fear = self.fear or 0, goal = math.floor(goal + 0.5) })
         local width = getTextManager():MeasureStringX(UIFont.Small, mood)
         self:drawText(mood, self.chatWidth - 16 - width, self.headerHeight > 100 and 84 or 58, 0.66, 0.59, 0.39, 1, UIFont.Small)
     end
@@ -387,7 +389,8 @@ function Window:loadHistory()
     bridge:request("history", { uid = self.uid, playerKey = Hooks.playerKey(self.player), limit = Chat.settings.historyLimit },
         function(ok, data)
             if not ok or type(data) ~= "table" or window.closed then return end
-            window.trust, window.fear = tonumber(data.trust), tonumber(data.fear)
+            window.trust, window.fear, window.goal = tonumber(data.trust), tonumber(data.fear), tonumber(data.goal)
+            Dialogue.learnMood(window.uid, data, nowMs())
             local lines = {}
             local turns = type(data.turns) == "table" and data.turns or {}
             for _, turn in ipairs(turns) do
@@ -582,7 +585,9 @@ end
 
 function Window:onReply(say, reply, outcome)
     self.thinkingSince = nil
-    if type(reply) == "table" and reply.trust ~= nil then self.trust, self.fear = tonumber(reply.trust), tonumber(reply.fear) end
+    if type(reply) == "table" and reply.trust ~= nil then
+        self.trust, self.fear, self.goal = tonumber(reply.trust), tonumber(reply.fear), tonumber(reply.goal)
+    end
     self:append("npc", say)
     if type(outcome) == "table" and outcome.action == "trade" and outcome.decision == "counter" and self.trade ~= nil then
         outcome.offer, outcome.missing = self.trade:applyCounter(outcome.offer, Hooks.tradeableItems(self.shell),

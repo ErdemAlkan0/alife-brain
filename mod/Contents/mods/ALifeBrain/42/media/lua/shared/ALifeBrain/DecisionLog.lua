@@ -4,12 +4,13 @@
 -- writes the dataset that rl/ trains on.
 --
 -- With trained weights (PolicyWeights.lua) the policy also runs in shadow mode: it picks
--- an action for every sampled decision and we count how often it agrees with A-Life. It
--- never acts; A-Life stays in charge.
+-- an action for every sampled decision and we count how often it agrees with A-Life. Here
+-- it never acts; Control.lua lets it choose when policy control is switched on.
 
 require "ALifeBrain/Json"
 require "ALifeBrain/Features"
 require "ALifeBrain/Policy"
+require "ALifeBrain/Moods"
 
 ALifeBrain = ALifeBrain or {}
 
@@ -36,19 +37,19 @@ local DecisionLog = {
 }
 ALifeBrain.DecisionLog = DecisionLog
 
--- Tests replace this with fakes: { bridge = ..., hooks = ... }.
+-- Tests replace this with fakes: { bridge = ..., hooks = ..., moods = ... (optional) }.
 DecisionLog.override = nil
 
 local function deps()
     if DecisionLog.override ~= nil then return DecisionLog.override end
-    return { bridge = ALifeBrain.bridge, hooks = ALifeBrain.Hooks }
+    return { bridge = ALifeBrain.bridge, hooks = ALifeBrain.Hooks, moods = ALifeBrain.Moods }
 end
 
 function DecisionLog.reset()
     DecisionLog.last, DecisionLog.queue = {}, {}
     DecisionLog.window = { atMs = 0, count = 0 }
     DecisionLog.lastFlushMs, DecisionLog.sentNames = 0, false
-    DecisionLog.stats = { seen = 0, sampled = 0, sent = 0, dropped = 0, failed = 0, labels = {},
+    DecisionLog.stats = { seen = 0, chosen = 0, sampled = 0, sent = 0, dropped = 0, failed = 0, labels = {},
         shadow = { decision = { n = 0, agree = 0 }, response = { n = 0, agree = 0 } } }
 end
 DecisionLog.reset()
@@ -77,12 +78,20 @@ function DecisionLog.loadPolicy(weights)
     return loaded, notes
 end
 
--- Hooks.installDecisionTap callback. moduleId is nil when A-Life fell back to its own logic.
-function DecisionLog.onDecision(kind, actor, shell, context, moduleId)
+-- Hooks.installDecisionTap callback. moduleId is nil when A-Life fell back to its own logic;
+-- chosen is true when the policy picked that module (Control.lua): not A-Life's choice, so it
+-- is neither training data nor compared in shadow mode, only counted.
+function DecisionLog.onDecision(kind, actor, shell, context, moduleId, chosen)
     local stats, settings = DecisionLog.stats, DecisionLog.settings
     stats.seen = stats.seen + 1
     if type(actor) ~= "table" or type(actor.uid) ~= "string" then return end
+    if chosen == true then
+        stats.chosen = stats.chosen + 1
+        return
+    end
     local d = deps()
+    -- The policy reads stored moods too, for NPCs not talked to in this session.
+    if d.moods ~= nil then d.moods.want(actor.uid, d.hooks.nowMs()) end
     local net = DecisionLog.nets ~= nil and DecisionLog.nets[kind] or nil
     local collect = DecisionLog.collecting(d.bridge)
     if not collect and net == nil then return end

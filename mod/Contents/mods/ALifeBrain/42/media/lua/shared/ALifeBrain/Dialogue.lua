@@ -78,16 +78,48 @@ function Dialogue.cleanSay(reply)
     return say
 end
 
--- Per-NPC state the RL policy will read (phase 5): trust / fear toward the player, last intent.
+-- The NPC's drive (goal: -100 lie low .. 100 go out for supplies and risks) settles back to 0
+-- with this half-life, the same as the sidecar's (memory.GOAL_HALF_LIFE_MS).
+Dialogue.GOAL_HALF_LIFE_MS = 1800000
+
+-- Per-NPC state the RL policy reads (Hooks.decisionObservation): trust / fear toward the
+-- player and the drive, as the sidecar stored them after this reply; last intent.
 function Dialogue.remember(uid, reply, now)
     local intent = type(reply.intent) == "string" and Dialogue.INTENTS[reply.intent] and reply.intent or "none"
     Dialogue.minds[uid] = {
         trust = clamp(reply.trust, -100, 100) or 0,
         fear = clamp(reply.fear, -100, 100) or 0,
+        goal = clamp(reply.goal, -100, 100) or 0,
+        goalAtMs = now,
         intent = intent,
         atMs = now,
     }
     return Dialogue.minds[uid]
+end
+
+-- Stored moods of NPCs not talked to in this session (Moods.lua, the chat window's history):
+-- fills only minds we do not have, a reply from this session is always fresher.
+function Dialogue.learnMood(uid, mood, now)
+    if type(uid) ~= "string" or type(mood) ~= "table" or Dialogue.minds[uid] ~= nil then return false end
+    Dialogue.minds[uid] = {
+        trust = clamp(mood.trust, -100, 100) or 0,
+        fear = clamp(mood.fear, -100, 100) or 0,
+        goal = clamp(mood.goal, -100, 100) or 0,
+        goalAtMs = now,
+        intent = "none",
+        atMs = now,
+        stored = true,
+    }
+    return true
+end
+
+-- The drive now, settled toward 0 since it was last stirred (-100..100).
+function Dialogue.goalNow(mind, now)
+    if type(mind) ~= "table" then return 0 end
+    local goal = tonumber(mind.goal) or 0
+    local elapsed = (tonumber(now) or 0) - (tonumber(mind.goalAtMs) or tonumber(now) or 0)
+    if goal == 0 or elapsed <= 0 then return goal end
+    return goal * 0.5 ^ (elapsed / Dialogue.GOAL_HALF_LIFE_MS)
 end
 
 -- Sends one line to the NPC. view (optional) gets view:onReply(say, reply, outcome),

@@ -12,11 +12,15 @@ mod/                      Zomboid/Workshop/ALifeBrain düzeni (workshop.txt + Co
     common/               B42'nin istediği sürümden bağımsız klasör
     42/mod.info           require=\ProjectALifeNPCs
     42/media/lua/shared/ALifeBrain/   Json, Bridge, ALifeBrainHooks (A-Life'a dokunan her şey), Dialogue, Trade,
-                                      Text, Features + Policy + DecisionLog (3. aşama), PolicyWeights (üretilir), Tests/
+                                      Text, Features + Policy + DecisionLog (3. aşama), PolicyWeights (üretilir),
+                                      Moods + Control (5. aşama), Companion, Standoff, Parley, Tests/
     42/media/lua/client/ALifeBrain/   ALifeBrainMain (başlatma, ping), EventLog, ChatWindow
 sidecar/                  Python sidecar (yalnızca standart kütüphane)
-rl/                       Policy eğitimi (numpy; rl/.venv): davranış klonlama, Lua'ya dışa aktarma
+rl/                       Policy eğitimi (rl/.venv): davranış klonlama (numpy), PPO (torch, SB3), Lua'ya dışa aktarma
 tests/lua/run_tests.lua   Lua testlerini standart Lua 5.1 / LuaJIT ile koşar
+tests/lua/run_tests.py    aynısı Python'dan, oyun olmadan (lupa: rl\.venv\Scripts\python -m pip install lupa;
+                          rl\.venv\Scripts\python tests\lua\run_tests.py). Kahlua birebir aynı değil; son söz oyunda
+                          -debug ile çalışan testler
 ```
 
 ## Güvenlik kuralları
@@ -73,7 +77,7 @@ Ayarlar: `%LOCALAPPDATA%\ALifeBrain\config.json` (ilk çalıştırmada varsayıl
   `player2.client_id` alanına yaz (veya `ALIFEBRAIN_PLAYER2_CLIENT_ID` ortam değişkeni).
 - OpenAI uyumlu servis: anahtar yalnızca `openai.api_key_env` alanında adı geçen ortam değişkeninden okunur;
   dosyaya anahtar yazılmaz.
-- Hafıza: `%LOCALAPPDATA%\ALifeBrain\memory.sqlite3` (NPC'ler, anılar, konuşmalar, güven/korku).
+- Hafıza: `%LOCALAPPDATA%\ALifeBrain\memory.sqlite3` (NPC'ler, anılar, konuşmalar, güven/korku, atılganlık).
 
 Oyunda: sidecar'ı başlat (LLM'siz denemek için `run-sidecar-fake.cmd`), dost bir NPC çağır ve yanında `T`'ye
 bas (ya da yere sağ tık → en üstte **A-Life Brain: <ad> ile konuş**). Sohbet penceresi açılır: A-Life'ın
@@ -167,3 +171,45 @@ Simülasyondaki bütün sayılar tasarım tercihidir (`SETTINGS`), ölçüm değ
 
 Testler: `rl\.venv\Scripts\python -m unittest discover rl\tests` (rl klasöründen: `.venv\Scripts\python -m unittest
 discover tests`).
+
+## Konuşma → davranış (5. aşama)
+
+Policy'nin girdileri konuşmalardan gelir (`Dialogue.minds`):
+- **Güven / korku** oyuncuya karşıdır (LLM her cevapta ±10 oynatır).
+- **Atılganlık** (`goal`) NPC'nin kendisine aittir: −100 sakin dur, güvende kal ↔ +100 ganimet için dışarı çık, risk al.
+  - LLM her cevapta `goal_delta` ile en çok ±25 oynatır. Örneğin "doğuda bir sürü var, dikkat et" atılganlığı düşürür;
+    "eczanede ilaç var" yükseltir.
+  - Değer 30 dakikalık yarı ömürle 0'a söner, yani tek bir konuşma NPC'yi kalıcı olarak değiştirmez.
+  - Sohbet penceresinin başlığında "Atılganlık" olarak görünür.
+
+Bu oturumda konuşulmamış NPC'lerin kayıtlı ruh hali, policy onlarla ilk karşılaştığında sidecar'dan istenir
+(`moods` isteği).
+
+**Policy kontrolü** varsayılan olarak kapalı. Açmak için Seçenekler → Modlar → A-Life Brain → **NPC davranışını
+eğitilmiş policy seçsin**. Değeri oyun kendi `ModOptions.ini` dosyasında tutar. Hata ayıklama konsolunda
+`ALifeBrain.control(true)` bu oturum için açar, `false` kapatır, `"option"` yeniden menüdeki ayara döner.
+
+Kontrol açıkken:
+- Policy, A-Life zinciri çalışmadan önce A-Life'ın kendi modüllerinden birini seçer ve o modül tek başına çalışır.
+  Modülün yapacak işi yoksa ya da seçim A-Life'ın kendi akışıysa (`default`), A-Life eskisi gibi karar verir.
+- Policy yalnızca bir seçim ekler, A-Life'ın bir seçimini asla engellemez:
+  - **Hep A-Life'ta kalır:**
+    - Oyuncunun emri (takip et / bekle).
+    - Konuşma (pencere açık ya da cevap yolda).
+    - Süren bir soygun.
+    - NPC'nin dahil olduğu bir pazarlık ya da NPC↔NPC uyarı merdiveni.
+    - Tehdit olarak oyuncu.
+    - Oyuncuya düşman tutumlu bir NPC, oyuncu 55 karenin içindeyken (A-Life'ın soygun modülü oyuncuyu bu mesafeden
+      fark eder).
+  - **Policy hiç seçmez:** `talk`, `robbery`, `orders`, takipçi ve pazarlık modülleri.
+  - **Oyuncu 20 karenin içindeyken** policy yalnızca bir uyarı (`careful`) ekleyebilir. Böylece A-Life'ın selamlaması
+    (6 kare) ve uyarısı (14 kare) sırasını korur.
+- Policy aynı NPC ve zincir için en çok 2,5 saniyede bir sorulur.
+
+`ALifeBrain.control()` (ya da `ALifeBrain.policy()`) şunları gösterir:
+- policy'nin neyi kaç kez çalıştırdığı;
+- yapacak işi olmayan seçimler;
+- kararın kaç kez ve neden A-Life'a bırakıldığı.
+
+Gölge modu istatistikleri yalnızca A-Life'ın kendi seçtiği kararları sayar. Policy'nin çalıştırdığı kararlar
+eğitim verisine girmez.

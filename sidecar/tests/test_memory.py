@@ -1,7 +1,7 @@
 import unittest
 
 from alifebrain_sidecar.experience import apply_event, weapon_name
-from alifebrain_sidecar.memory import MemoryStore, Npc
+from alifebrain_sidecar.memory import GOAL_HALF_LIFE_MS, MemoryStore, Npc
 
 DAY_MS = 24 * 3_600_000
 
@@ -24,6 +24,23 @@ class MemoryStoreTests(unittest.TestCase):
         self.store.shift_mood("u1", "sp:0", 60, -5, 1)
         self.assertEqual(self.store.shift_mood("u1", "sp:0", 60, 0, 2), (100, -5))
         self.assertEqual(self.store.mood("u1", "other"), (0, 0))
+
+    def test_drive_is_per_npc_clamped_and_settles_back(self):
+        self.assertEqual(self.store.drive("u1", 0), 0)
+        self.assertEqual(self.store.shift_drive("u1", 80, 0), 80)
+        self.assertEqual(self.store.shift_drive("u1", 80, 0), 100, "clamped")
+        self.assertEqual(self.store.drive("u1", GOAL_HALF_LIFE_MS), 50, "halves every half-life")
+        self.assertEqual(self.store.shift_drive("u1", -60, GOAL_HALF_LIFE_MS), -10, "shifts from the settled value")
+        self.assertEqual(self.store.drive("u2", 0), 0)
+
+    def test_moods_lists_only_npcs_with_something_stored(self):
+        self.store.shift_mood("u1", "sp:0", 20, 5, 0)
+        self.store.shift_drive("u2", -40, 0)
+        self.store.shift_mood("u3", "other", 50, 0, 0)
+        self.assertEqual(self.store.moods(["u1", "u2", "u3", "u4"], "sp:0", GOAL_HALF_LIFE_MS), [
+            {"uid": "u1", "trust": 20, "fear": 5, "goal": 0},
+            {"uid": "u2", "trust": 0, "fear": 0, "goal": -20},
+        ])
 
     def test_recall_spans_layers_and_ranks_by_importance_recency_and_relevance(self):
         now = 10 * DAY_MS

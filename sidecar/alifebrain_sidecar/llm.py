@@ -129,6 +129,11 @@ class FakeProvider:
         (("wait", "bekle"), "stay", None),
         (("bye", "hoşça", "hosca"), "leave", None),
     )
+    # The drive (goal_delta): talk of danger calms it down, talk of supplies stirs it up.
+    GOAL_WORDS = (
+        (("danger", "careful", "hide", "tehlike", "dikkat", "saklan"), -25),
+        (("loot", "supplies", "ganimet", "erzak", "malzeme"), 25),
+    )
 
     def chat(self, messages: list[Message], *, max_tokens: int, temperature: float, timeout: float) -> str:
         said = next((m["content"] for m in reversed(messages) if m["role"] == "user"), "")
@@ -154,11 +159,18 @@ class FakeProvider:
                 if any(word in lowered for word in words):
                     intent, item = action, thing
                     break
+        goal = 0
+        for words, delta in self.GOAL_WORDS:
+            if any(word in lowered for word in words):
+                goal = delta
+                break
         return json.dumps({
-            "say": f"(test) You said: {heard[:120]}" + (f" -> {intent} {item or ''}".rstrip() if intent != "none" else ""),
+            "say": f"(test) You said: {heard[:120]}" + (f" -> {intent} {item or ''}".rstrip() if intent != "none" else "")
+                   + (f" [goal {goal:+d}]" if goal else ""),
             "memory_note": f"The stranger said: {heard[:80]}",
             "trust_delta": 1,
             "fear_delta": 0,
+            "goal_delta": goal,
             "intent": intent,
             "item": item,
             "trade": trade,

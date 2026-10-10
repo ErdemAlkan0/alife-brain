@@ -283,6 +283,15 @@ end
 local actor = { uid = "palife:9", factionId = "alife_church_volunteers", profileId = "volunteer" }
 
 ALifeBrain.Tests.suite("DecisionLog", {
+    { "a module the policy picked is neither training data nor compared", run(true, function(check, env)
+        DecisionLog.nets = { decision = tinyNet() }
+        DecisionLog.onDecision("decision", actor, {}, {}, "regroup", true)
+        check.equal(#DecisionLog.queue, 0)
+        check.equal(DecisionLog.stats.shadow.decision.n, 0)
+        check.equal(DecisionLog.stats.chosen, 1)
+        DecisionLog.onDecision("decision", actor, {}, {}, "regroup", false)
+        check.equal(#DecisionLog.queue, 1, "A-Life's own choice still is")
+    end) },
     { "samples a choice once per period, and every change", run(true, function(check, env)
         DecisionLog.onDecision("decision", actor, {}, {}, "regroup")
         env.now = env.now + 150

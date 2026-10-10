@@ -1,6 +1,6 @@
 -- Entry point: starts the sidecar bridge, keeps a ping going, runs the in-game tests
 -- in debug mode. Debug console helpers: ALifeBrain.status(), ALifeBrain.ping(),
--- ALifeBrain.runTests(), ALifeBrain.policy().
+-- ALifeBrain.runTests(), ALifeBrain.policy(), ALifeBrain.control(on).
 
 require "ALifeBrain/Json"
 require "ALifeBrain/Bridge"
@@ -8,6 +8,8 @@ require "ALifeBrain/ALifeBrainHooks"
 require "ALifeBrain/EventLog"
 require "ALifeBrain/Dialogue"
 require "ALifeBrain/DecisionLog"
+require "ALifeBrain/Moods"
+require "ALifeBrain/Control"
 require "ALifeBrain/Companion"
 require "ALifeBrain/Standoff"
 require "ALifeBrain/Parley"
@@ -100,6 +102,7 @@ function Main.onTick()
     bridge:tick()
     ALifeBrain.Dialogue.tick(nowMs())
     ALifeBrain.DecisionLog.tick(nowMs())
+    ALifeBrain.Moods.tick(nowMs())
     if Main.modulesAtMs ~= nil then
         local now = nowMs()
         ALifeBrain.Parley.tick(now)
@@ -112,6 +115,8 @@ function Main.onTick()
             Main.modulesAtMs = now
             Hooks.installModules()
             ALifeBrain.Standoff.forget(now)
+            ALifeBrain.Control.forget(now)
+            ALifeBrain.Moods.forget(now)
         end
     end
     if bridge:isOnline() and nowMs() - Main.lastPingAtMs >= Main.settings.pingIntervalMs then
@@ -167,7 +172,36 @@ function Main.onGameStart()
         local loaded, notes = ALifeBrain.DecisionLog.loadPolicy()
         log("policy (shadow mode): " .. (#loaded > 0 and table.concat(loaded, ", ") or "none trained yet")
             .. (#notes > 0 and (" [" .. table.concat(notes, "; ") .. "]") or ""))
+        -- Phase 5: with policy control on, the policy picks among A-Life's modules (Control.lua).
+        local Control = ALifeBrain.Control
+        local chooser = Hooks.setDecisionChooser(Control.pick, Control.onChosen)
+        Main.loadOptions()
+        log("policy control: " .. (Control.enabled() and "on" or "off") .. " (Mod Options; tap "
+            .. (chooser and "ready" or "missing") .. ")")
     end
+end
+
+-- Mod Options (B42 PZAPI.ModOptions): one tick box for policy control. The game keeps its
+-- value in its own ModOptions.ini; created when this file loads, so the options screen has it.
+function Main.createOptions()
+    local api = type(PZAPI) == "table" and PZAPI.ModOptions or nil
+    if type(api) ~= "table" or type(api.create) ~= "function" then return false, "no_mod_options" end
+    local T = ALifeBrain.Text
+    local ok, options = pcall(api.create, api, "ALifeBrain", "A-Life Brain")
+    if not ok or type(options) ~= "table" then return false, tostring(options) end
+    local made, option = pcall(options.addTickBox, options, "policyControl", T.get("option_control"), false,
+        T.get("option_control_tip"))
+    if not made then return false, tostring(option) end
+    Main.options = options
+    ALifeBrain.Control.option = option
+    return true
+end
+
+-- The options screen reads ModOptions.ini only when it is built; read the saved values now.
+function Main.loadOptions()
+    local api = type(PZAPI) == "table" and PZAPI.ModOptions or nil
+    if Main.options == nil or type(api) ~= "table" or type(api.load) ~= "function" then return false end
+    return pcall(api.load, api)
 end
 
 function ALifeBrain.status()
@@ -192,6 +226,10 @@ function ALifeBrain.status()
     local parley = ALifeBrain.Parley
     status.parley = { stats = parley.stats, active = parley.active ~= nil and parley.active.uid or nil,
         lastNote = parley.lastNote }
+    local control = ALifeBrain.Control
+    status.control = { on = control.enabled(), decision = control.stats.decision, response = control.stats.response,
+        reasons = control.stats.reasons, chooserError = Hooks.decisionChooserError }
+    status.moods = ALifeBrain.Moods.stats
     log(tostring(Json.encode(status)))
     return status
 end
@@ -211,7 +249,32 @@ function ALifeBrain.policy()
                 .. "% of " .. Json.intToString(agreement.n))
         end
     end
+    ALifeBrain.control()
     return ALifeBrain.DecisionLog.agreement()
+end
+
+-- Debug console: ALifeBrain.control(true) lets the policy choose for this session, false
+-- stops it, "option" follows the Mod Options tick box again; ALifeBrain.control() reports
+-- what it chose (ran) and how often A-Life kept the decision (left: why; near: a player).
+function ALifeBrain.control(on)
+    local Control = ALifeBrain.Control
+    if on == "option" then Control.forced = nil elseif on ~= nil then Control.forced = on == true end
+    log("policy control " .. (Control.enabled() and "ON" or "off")
+        .. (Control.forced ~= nil and " (console)" or " (Mod Options)"))
+    for _, kind in ipairs({ "decision", "response" }) do
+        local s = Control.stats[kind]
+        log("  " .. kind .. ": asked " .. Json.intToString(s.asked) .. ", ran " .. Json.intToString(s.ran)
+            .. ", nothing to do " .. Json.intToString(s.declined) .. ", near a player " .. Json.intToString(s.near)
+            .. ", left to A-Life " .. Json.intToString(s.left))
+    end
+    local modules = {}
+    for key, count in pairs(Control.stats.modules) do modules[#modules + 1] = { key = key, count = count } end
+    table.sort(modules, function(a, b) return a.count > b.count end)
+    for index = 1, math.min(#modules, 10) do
+        log("  ran " .. modules[index].key .. " x" .. Json.intToString(modules[index].count))
+    end
+    for reason, count in pairs(Control.stats.reasons) do log("  left to A-Life: " .. reason .. " x" .. Json.intToString(count)) end
+    return Control.enabled()
 end
 
 function ALifeBrain.ping() return Main.ping() end
@@ -229,6 +292,8 @@ end
 function ALifeBrain.runTests()
     return ALifeBrain.Tests.runAll(log)
 end
+
+Main.createOptions()
 
 if type(Events) == "table" then
     if Events.OnGameStart ~= nil then Events.OnGameStart.Add(Main.onGameStart) end

@@ -7,5 +7,6 @@ require "ALifeBrain/Tests/DialogueTests"
 require "ALifeBrain/Tests/TradeTests"
 require "ALifeBrain/Tests/BehaviorTests"
 require "ALifeBrain/Tests/ParleyTests"
+require "ALifeBrain/Tests/ControlTests"
 
 return ALifeBrain.Tests

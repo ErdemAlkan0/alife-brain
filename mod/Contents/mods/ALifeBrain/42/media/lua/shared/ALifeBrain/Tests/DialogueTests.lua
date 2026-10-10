@@ -123,11 +123,12 @@ ALifeBrain.Tests.suite("Dialogue", {
         check.equal(env.calls[1][1], "hold", "the NPC stops before the bubble")
     end) end },
 
-    { "speaks the reply and remembers trust and fear", function(check) run(nil, function(env)
+    { "speaks the reply and remembers trust, fear and drive", function(check) run(nil, function(env)
         env.talk()
-        env.answer(1, true, { say = "  Keep\nback.  ", trust = 12, fear = 140, intent = "warn" })
+        env.answer(1, true, { say = "  Keep\nback.  ", trust = 12, fear = 140, goal = -30, intent = "warn" })
         check.same(env.said(), { "...", "Keep back." })
-        check.same(Dialogue.minds["palife:1"], { trust = 12, fear = 100, intent = "warn", atMs = 5000 })
+        check.same(Dialogue.minds["palife:1"], { trust = 12, fear = 100, goal = -30, goalAtMs = 5000, intent = "warn",
+            atMs = 5000 })
         check.equal(Dialogue.metrics.answered, 1)
         check.isNil(Dialogue.pending["palife:1"])
     end) end },

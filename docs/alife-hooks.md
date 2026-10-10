@@ -84,6 +84,15 @@ API:
   `only == nil` olan tam zincir çalışmalarını (`decision`, `response`) izler ve sonucu değiştirmeden döndürür. Etiket =
   modül id'si ya da `default` (zincir boş döndü, A-Life'ın kendi akışı). İzinli modüller (eylem maskesi):
   `Registry.order` içinde `dispatch == kind` olanlar ve `Registry.allows(actor, id)`.
+- **Uygulandı (5. aşama):** aynı sarmalayıcı (`Hooks.wrapEvaluate`), policy kontrolü açıkken tam zincirden **önce**
+  `Hooks.decisionChooser`'a (`Control.pick`) sorar; bir modül id'si dönerse o modül tek başına (`only`) çalışır,
+  `nil` dönerse (yapacak işi yok) ya da seçim yoksa A-Life'ın zinciri eskisi gibi çalışır. Modüller `evaluate`
+  içinde hareket başlatır, animasyon/ses çalar, belleğe yazar (`context.startMovement`, `persistMemory`; ör.
+  `Search.evaluate`): bu yüzden zincir önce çalıştırılıp sonucu sonradan değiştirilemez. Policy'nin seçtiği kararlar
+  `chosen = true` ile bildirilir, BC verisine girmez. A-Life'ın kendi lull çağrıları (`only` dolu) olduğu gibi geçer.
+  `Hooks.orderOf(uid)` (`DecisionLoop.orders`), `Hooks.nearestPlayer(shell)` ve `Hooks.stance` Control'ün "A-Life'a
+  bırak" kararları için. Mesafeler A-Life'tan: `ModuleCareful.settings.warnRadius` 14 (`memory.carefulRadii` ve
+  senaryolu karşılaşmalar değiştirebilir), `ModuleTalkPresence.courtesyTiles` 6, `ModuleRobbery.detectRadius` 55.
 - Gözlem kaynakları (`Hooks.decisionObservation`): gövde modData'sı (§9), `context.threat/threatKind`,
   `Perception.zombieSnapshot` (algı her 200 ms'de yeniler: `bodies` = sıradan zombiler, `actors` = A-Life gövdeleri,
   ikisi de `{body, x, y, z}`; algı çalışmadan önce `nil`), `ActorRegistry.peek(uid).memory.groupId` (squad),

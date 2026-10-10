@@ -101,6 +101,18 @@ class ParseReplyTests(unittest.TestCase):
         self.assertEqual(reply.say, "Keep your distance.")
         self.assertEqual(reply.intent, "warn")
         self.assertEqual((reply.trust_delta, reply.fear_delta), (2, -1))
+        self.assertEqual(reply.goal_delta, 0, "missing goal_delta is 0")
+
+    def test_goal_delta_is_clamped_wider_than_moods(self):
+        reply = parse_reply('{"say": "Let us go.", "trust_delta": 40, "goal_delta": 90}')
+        self.assertEqual((reply.trust_delta, reply.goal_delta), (10, 25))
+        self.assertEqual(parse_reply('{"say": "Hide.", "goal_delta": "-12"}').goal_delta, -12)
+
+    def test_prompt_states_the_drive(self):
+        request = parse_request(request_data())
+        system, _ = build_messages(request, memories=[], history=[], trust=0, fear=0, goal=-40)
+        self.assertIn("Your drive right now is -40", system["content"])
+        self.assertIn("goal_delta", system["content"])
 
     def test_extracts_json_from_chatty_or_fenced_output(self):
         for text in ['Sure! {"say": "Hi."} Hope that helps',

@@ -24,7 +24,7 @@ from .events import EventStore
 from .experience import apply_event
 from .files import FileBridge
 from .llm import LLMError
-from .memory import MemoryStore
+from .memory import GOAL_HALF_LIFE_MS, MemoryStore
 from .protocol import (
     PROTOCOL,
     ProtocolError,
@@ -39,6 +39,7 @@ log = logging.getLogger(__name__)
 
 # Request types that are acknowledged implicitly and never get a response line.
 NO_REPLY_TYPES = frozenset({"event", "ack"})
+MOODS_PER_REQUEST = 32
 
 
 def wall_clock_ms() -> int:
@@ -118,6 +119,7 @@ class Sidecar:
             "event": self._event,
             "dialogue": self._dialogue,
             "history": self._history,
+            "moods": self._moods,
             "ack": lambda request, now: None,
         }
 
@@ -127,7 +129,7 @@ class Sidecar:
         if self.dataset is not None:
             features.append("dataset")
         if self.memory is not None:
-            features.append("history")
+            features += ["history", "moods"]
         if self.memory is not None and self.provider is not None:
             features += ["dialogue", "actions"]
         return features
@@ -338,6 +340,7 @@ class Sidecar:
             history=self.memory.recent_turns(uid, player_key, settings.history_turns),
             trust=trust,
             fear=fear,
+            goal=self.memory.drive(uid, now),
         )
         log.debug("dialogue prompt for %s:\n%s", uid, "\n---\n".join(m["content"] for m in messages))
         future = self.executor.submit(self.provider.chat, messages, max_tokens=settings.max_tokens,
@@ -362,8 +365,10 @@ class Sidecar:
                 self.memory.add_memory("personal", uid, ts=done, kind="dialogue", text=reply.memory_note,
                                        importance=4, player_key=player_key)
             new_trust, new_fear = self.memory.shift_mood(uid, player_key, reply.trust_delta, reply.fear_delta, done)
-            log.info("%s (%s) -> %r intent=%s%s trust=%d fear=%d (%d ms)", npc.name or uid, uid, reply.say,
-                     reply.intent, f" item={reply.item}" if reply.item else "", new_trust, new_fear, done - now)
+            new_goal = self.memory.shift_drive(uid, reply.goal_delta, done)
+            log.info("%s (%s) -> %r intent=%s%s trust=%d fear=%d goal=%d (%d ms)", npc.name or uid, uid, reply.say,
+                     reply.intent, f" item={reply.item}" if reply.item else "", new_trust, new_fear, new_goal,
+                     done - now)
             trade = None
             if reply.deal_guard:
                 log.info("%s give was part of a deal: put on the trade table instead (offer=%s wants=%s)", uid,
@@ -375,7 +380,7 @@ class Sidecar:
                          list(reply.trade_offer), list(reply.trade_wants))
             return {"say": reply.say, "intent": reply.intent, "item": reply.item, "trade": trade,
                     "trustDelta": reply.trust_delta, "fearDelta": reply.fear_delta, "trust": new_trust,
-                    "fear": new_fear}
+                    "fear": new_fear, "goalDelta": reply.goal_delta, "goal": new_goal}
 
         return Deferred(future, finish)
 
@@ -393,4 +398,17 @@ class Sidecar:
         npc = self.memory.npc(uid)
         turns = [{"speaker": speaker, "text": text, "ts": ts}
                  for speaker, text, ts in self.memory.recent_turns_with_time(uid, player_key, limit)]
-        return {"uid": uid, "name": npc.name if npc else None, "trust": trust, "fear": fear, "turns": turns}
+        return {"uid": uid, "name": npc.name if npc else None, "trust": trust, "fear": fear,
+                "goal": self.memory.drive(uid, now), "turns": turns}
+
+    def _moods(self, request: Request, now: int) -> dict:
+        """Stored trust / fear (toward one player) and goal of NPCs the game's policy is about to
+        read; only NPCs with something stored are listed (the rest start at 0)."""
+        if self.memory is None:
+            raise HandlerError("moods_unavailable")
+        data = request.data if isinstance(request.data, dict) else {}
+        player_key, uids = data.get("playerKey"), data.get("uids")
+        if not isinstance(player_key, str) or not player_key or not isinstance(uids, list):
+            raise HandlerError("uids_or_player_missing")
+        wanted = [uid for uid in uids if isinstance(uid, str) and uid][:MOODS_PER_REQUEST]
+        return {"moods": self.memory.moods(wanted, player_key, now), "goalHalfLifeMs": GOAL_HALF_LIFE_MS}

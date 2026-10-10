@@ -21,6 +21,7 @@ MAX_SAY = 200
 MAX_NOTE = 200
 MAX_INPUT = 300
 DELTA_LIMIT = 10
+GOAL_DELTA_LIMIT = 25  # the drive (memory.GOAL_LIMIT) moves faster than trust / fear, and settles back
 
 STRANGER_SAYS = "The stranger says:"
 
@@ -104,6 +105,8 @@ class DialogueReply:
     fear_delta: int
     intent: str
     item: str | None = None
+    # How the exchange stirs the NPC's drive (the policy's goal): + go out for supplies, - lie low.
+    goal_delta: int = 0
     # Trade answer: "accept" (the table swaps now), "reject", or "counter" with trade_offer
     # (names of things the NPC carries that it puts on the table instead) and trade_wants
     # (names of the stranger's things it wants back; the game puts them on the table too).
@@ -304,7 +307,7 @@ def _situation(request: DialogueRequest) -> list[str]:
 
 
 def build_messages(request: DialogueRequest, *, memories: list[Memory], history: list[tuple[str, str]],
-                   trust: int, fear: int) -> list[dict[str, str]]:
+                   trust: int, fear: int, goal: int = 0) -> list[dict[str, str]]:
     npc = request.npc
     who = f"{npc.name}, a survivor" if npc.name else "a survivor"
     identity = [f"You are {who} in Knox County, Kentucky, during the 1993 zombie outbreak."]
@@ -322,6 +325,8 @@ def build_messages(request: DialogueRequest, *, memories: list[Memory], history:
         "You are talking to another survivor you only know as \"the stranger\".",
         f"How you see the stranger: {STANCES['hostile' if request.standoff else request.stance]}. "
         f"Your trust in them is {trust} and your fear of them is {fear} (both from -100 to 100).",
+        f"Your drive right now is {goal} (from -100 = lie low and keep safe to 100 = go out for supplies and "
+        "take risks).",
     ]
     situation = _situation(request)
     if request.following:
@@ -361,7 +366,7 @@ def build_messages(request: DialogueRequest, *, memories: list[Memory], history:
         "over before, nothing was handed over: set the intent now.\n"
         "- Example: the stranger asks for your bandage and you agree -> "
         '{"say": "Here, take it.", "memory_note": "I gave the stranger a bandage.", "trust_delta": 2, '
-        '"fear_delta": 0, "intent": "give", "item": "medicine", "trade": null}\n'
+        '"fear_delta": 0, "goal_delta": 0, "intent": "give", "item": "medicine", "trade": null}\n'
         "- Trading: when something is on the trade table, or you want to propose a swap, set "
         '"trade": {"decision": "accept" | "reject" | "counter", "npc_offer": [names of things you carry], '
         '"npc_wants": [names of the stranger\'s things you want back]}. '
@@ -375,15 +380,18 @@ def build_messages(request: DialogueRequest, *, memories: list[Memory], history:
         "accept: counter with what you want.\n"
         "- Example: the stranger offers a bandage for your water -> "
         '{"say": "Water for that bandage. Fair.", "memory_note": "I agreed to swap my water for the stranger\'s '
-        'bandage.", "trust_delta": 1, "fear_delta": 0, "intent": "trade", "item": null, "trade": '
+        'bandage.", "trust_delta": 1, "fear_delta": 0, "goal_delta": 0, "intent": "trade", "item": null, "trade": '
         '{"decision": "counter", "npc_offer": ["Water Bottle"], "npc_wants": ["Bandage"]}}\n'
         "- Reply with exactly one JSON object and nothing else:\n"
-        '{"say": "...", "memory_note": "...", "trust_delta": 0, "fear_delta": 0, "intent": "none", "item": null, '
-        '"trade": null}\n'
+        '{"say": "...", "memory_note": "...", "trust_delta": 0, "fear_delta": 0, "goal_delta": 0, "intent": "none", '
+        '"item": null, "trade": null}\n'
         "  say: your spoken words.\n"
         "  memory_note: one short sentence worth remembering about this exchange, or \"\".\n"
         f"  trust_delta, fear_delta: integers from -{DELTA_LIMIT} to {DELTA_LIMIT}; how this exchange changes "
         "your trust in and fear of the stranger.\n"
+        f"  goal_delta: integer from -{GOAL_DELTA_LIMIT} to {GOAL_DELTA_LIMIT}; how this exchange changes your "
+        "drive: up when the stranger tells you where supplies are or urges you on, down when they warn you of "
+        "danger or talk you into lying low. Usually 0.\n"
         f"  intent: one of {', '.join(INTENTS)}. Use none unless you really mean to act.\n"
         "  item: only with intent give, otherwise null."
     )
@@ -435,7 +443,7 @@ def _shorten(text: str, limit: int) -> str:
     return (cut[:space] if space >= limit // 2 else cut).rstrip(",;:") + "..."
 
 
-def _delta(value: Any) -> int:
+def _delta(value: Any, limit: int = DELTA_LIMIT) -> int:
     if isinstance(value, str):
         try:
             value = float(value)
@@ -444,7 +452,7 @@ def _delta(value: Any) -> int:
     number = _int(value)
     if number is None:
         return 0
-    return max(-DELTA_LIMIT, min(DELTA_LIMIT, number))
+    return max(-limit, min(limit, number))
 
 
 def resolve_item(raw: str | None, request: DialogueRequest | None = None) -> str | None:
@@ -618,6 +626,7 @@ def parse_reply(text: str, request: DialogueRequest | None = None) -> DialogueRe
         fear_delta=_delta(data.get("fear_delta")),
         intent=intent,
         item=item,
+        goal_delta=_delta(data.get("goal_delta"), GOAL_DELTA_LIMIT),
         trade_decision=trade_decision,
         trade_offer=trade_offer,
         trade_wants=trade_wants,

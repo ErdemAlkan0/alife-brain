@@ -82,6 +82,17 @@ function Standoff.step(key, view, now)
     return "hold"
 end
 
+-- True while this NPC is on a warning ladder with another NPC (looked at within graceMs).
+function Standoff.involves(uid, now)
+    local prefix = tostring(uid) .. ">"
+    for key, ladder in pairs(Standoff.ladders) do
+        if string.sub(key, 1, #prefix) == prefix and now - ladder.seenMs <= Standoff.settings.graceMs then
+            return true
+        end
+    end
+    return false
+end
+
 -- Drops ladders nobody has looked at for a while (called now and then).
 function Standoff.forget(now)
     for key, ladder in pairs(Standoff.ladders) do

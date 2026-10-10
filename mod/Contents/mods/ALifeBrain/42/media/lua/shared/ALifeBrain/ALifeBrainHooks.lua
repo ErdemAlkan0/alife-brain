@@ -747,7 +747,14 @@ end
 
 Hooks.DECISION_KINDS = { decision = true, response = true }
 
--- onDecision(kind, actor, shell, context, moduleId | nil)
+-- Phase 5: a chooser (Control.pick) may name one module of the chain before A-Life runs it.
+-- That module then runs alone, the way A-Life's own lull calls do ("only"); if it has nothing
+-- to do (nil), or the chooser names none, A-Life's whole chain runs as before. Modules start
+-- movements and play voices while they evaluate, so the chain is never run first and then
+-- overruled.
+--
+-- onDecision(kind, actor, shell, context, moduleId | nil, chosen) -- chosen: the chooser's pick ran
+-- chooser(kind, actor, shell, context) -> module id | nil; onChosen(kind, actor, moduleId, ran)
 function Hooks.installDecisionTap(onDecision)
     local registry = Hooks.available() and ProjectALife.ModuleRegistry or nil
     if registry == nil or type(registry.evaluate) ~= "function" then return false, "module_registry_unavailable" end
@@ -755,15 +762,44 @@ function Hooks.installDecisionTap(onDecision)
     if Hooks.originalEvaluate ~= nil then return true, "already_installed" end
     local original = registry.evaluate
     Hooks.originalEvaluate = original
-    registry.evaluate = function(kind, actor, shell, context, only)
-        local result, moduleId = original(kind, actor, shell, context, only)
-        if only == nil and Hooks.DECISION_KINDS[kind] and type(Hooks.decisionTap) == "function" then
-            local ok, failure = pcall(Hooks.decisionTap, kind, actor, shell, context, result ~= nil and moduleId or nil)
-            if not ok then Hooks.decisionTapError = tostring(failure) end
+    registry.evaluate = Hooks.wrapEvaluate(original)
+    return true, "installed"
+end
+
+-- The wrapped Registry.evaluate (kept apart so tests can run it on a fake original).
+function Hooks.wrapEvaluate(original)
+    local function tap(kind, actor, shell, context, moduleId, chosen)
+        if type(Hooks.decisionTap) ~= "function" then return end
+        local ok, failure = pcall(Hooks.decisionTap, kind, actor, shell, context, moduleId, chosen)
+        if not ok then Hooks.decisionTapError = tostring(failure) end
+    end
+    return function(kind, actor, shell, context, only)
+        local full = only == nil and Hooks.DECISION_KINDS[kind] == true
+        if full and type(Hooks.decisionChooser) == "function" then
+            local ok, choice = pcall(Hooks.decisionChooser, kind, actor, shell, context)
+            if not ok then
+                Hooks.decisionChooserError = tostring(choice)
+            elseif type(choice) == "string" then
+                local result, moduleId = original(kind, actor, shell, context, choice)
+                if type(Hooks.decisionChosen) == "function" then
+                    pcall(Hooks.decisionChosen, kind, actor, choice, result ~= nil)
+                end
+                if result ~= nil then
+                    tap(kind, actor, shell, context, moduleId, true)
+                    return result, moduleId
+                end
+            end
         end
+        local result, moduleId = original(kind, actor, shell, context, only)
+        if full then tap(kind, actor, shell, context, result ~= nil and moduleId or nil, false) end
         return result, moduleId
     end
-    return true, "installed"
+end
+
+-- chooser / onChosen as above; nil removes them (A-Life alone decides again).
+function Hooks.setDecisionChooser(chooser, onChosen)
+    Hooks.decisionChooser, Hooks.decisionChosen = chooser, onChosen
+    return Hooks.originalEvaluate ~= nil
 end
 
 -- The modules of that chain this NPC may run (its behavior profile, conduct, switches).
@@ -814,6 +850,22 @@ local function nearestPlayer(x, y)
         end
     end
     return best, bestDistance
+end
+
+-- The nearest living player to this body and the distance (tiles), or nil.
+function Hooks.nearestPlayer(shell)
+    local x, y = xyzOf(shell)
+    return nearestPlayer(x, y)
+end
+
+-- A player's standing order to this NPC (DecisionLoop.orders: { kind = "follow" | "hold" |
+-- "patrol", untilMs?, ... }) while it lasts, or nil.
+function Hooks.orderOf(uid)
+    local loop = decisions()
+    local order = loop ~= nil and type(loop.orders) == "table" and loop.orders[uid] or nil
+    if type(order) ~= "table" then return nil end
+    if order.untilMs ~= nil and Hooks.nowMs() >= order.untilMs then return nil end
+    return order
 end
 
 -- Plain zombies and other A-Life NPCs around the NPC, from the snapshot A-Life's perception
@@ -897,8 +949,13 @@ function Hooks.decisionObservation(kind, actor, shell, context, now)
         local state = type(loop.states) == "table" and loop.states[uid] or nil
         raw.previous = type(state) == "table" and state.kind or nil
     end
-    local mind = ALifeBrain.Dialogue ~= nil and ALifeBrain.Dialogue.minds[uid] or nil
-    if type(mind) == "table" then raw.trust, raw.fear = mind.trust, mind.fear end
+    -- What conversations left (phase 5): trust / fear toward the player, the drive (-1..1).
+    local dialogue = ALifeBrain.Dialogue
+    local mind = dialogue ~= nil and dialogue.minds[uid] or nil
+    if type(mind) == "table" then
+        raw.trust, raw.fear = mind.trust, mind.fear
+        raw.goal = dialogue.goalNow(mind, now) / 100
+    end
     local memory = type(actor.memory) == "table" and actor.memory or {}
     raw.robbery = memory.robbery ~= nil
     raw.talkHold = (tonumber(memory.talkHoldUntilMs) or 0) > now
