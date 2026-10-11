@@ -41,6 +41,15 @@ class DatasetStoreTests(unittest.TestCase):
         schema = json.loads((self.dir / "schema-1.json").read_text(encoding="utf-8"))
         self.assertEqual(schema, {"schema": 1, "names": NAMES})
 
+    def test_marks_the_policys_picks_and_policy_control(self):
+        self.store.add_batch({"kind": "decision_samples", "schema": 1, "names": NAMES,
+                              "rows": [row(c=True, ctl=True, pa="regroup"), row(ctl=True), row(c="yes")]},
+                             ts=5, session="s1")
+        picked, alife, junk = self.lines()
+        self.assertEqual((picked["chosen"], picked["control"], picked["policy"]), (True, True, "regroup"))
+        self.assertEqual((alife.get("chosen"), alife["control"]), (None, True))
+        self.assertNotIn("chosen", junk, "only a real true marks a row")
+
     def test_drops_rows_that_do_not_fit(self):
         self.store.add_batch({"schema": 1, "names": NAMES, "rows": [row()]}, ts=5, session="s1")
         bad = [row(o=[1, 0]), row(d="positioning"), row(a="bad label!"), row(o=[1, True, 0]),

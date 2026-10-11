@@ -65,9 +65,10 @@ def rows(directory: Path) -> Iterator[dict]:
 
 def load(directory: Path, dispatch: str, schema: int | None = None,
          exclude: frozenset[str] = frozenset()) -> Dataset | None:
-    """Every decision of one chain ("decision" or "response") for one schema (the newest by
-    default), leaving out decisions labelled with an exclude action (e.g. data recorded while
-    one of our modules misbehaved); None when there is none."""
+    """Every decision A-Life made in one chain ("decision" or "response") for one schema (the
+    newest by default), leaving out decisions labelled with an exclude action (e.g. data
+    recorded while one of our modules misbehaved) and those the policy picked under policy
+    control ("chosen": not A-Life's choice); None when there is none."""
     known = schemas(directory)
     if not known:
         return None
@@ -78,7 +79,7 @@ def load(directory: Path, dispatch: str, schema: int | None = None,
     kept = [row for row in rows(directory)
             if row.get("schema") == schema and row.get("dispatch") == dispatch
             and isinstance(row.get("obs"), list) and len(row["obs"]) == len(names) and isinstance(row.get("label"), str)
-            and row["label"] not in exclude]
+            and row["label"] not in exclude and row.get("chosen") is not True]
     if not kept:
         return None
     modules = set()

@@ -30,7 +30,10 @@ local Dialogue = {
         giveCooldownMs = 20000,
         followMs = 600000,
         stayMs = 600000,
-        followTrust = 10,
+        -- The LLM agrees to follow (it sees the trust); the game only refuses an NPC that
+        -- distrusts the player or is hostile. It was 10: the LLM moves trust 1-3 per reply, so
+        -- NPCs said "let's move" and stayed put (play test, 2026-10-11).
+        followTrust = 0,
     },
     -- Mirrors sidecar dialogue.INTENTS / ACTIONS / ITEMS; anything else is treated as "none".
     INTENTS = { none = true, give = true, follow = true, stay = true, leave = true, trade = true, warn = true,
@@ -312,7 +315,9 @@ function Dialogue.act(player, record, shell, mind, reply, now, entry)
             end
         end
     elseif intent == "follow" then
-        local trusted = hooks.stance(record, player) == "friendly" or (mind.trust or 0) >= Dialogue.limits.followTrust
+        local stance = hooks.stance(record, player)
+        local trusted = stance == "friendly"
+            or (stance ~= "hostile" and (mind.trust or 0) >= Dialogue.limits.followTrust)
         if not trusted then
             outcome.reason = "low_trust"
         else

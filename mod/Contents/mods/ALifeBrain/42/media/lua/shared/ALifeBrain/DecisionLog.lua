@@ -37,19 +37,19 @@ local DecisionLog = {
 }
 ALifeBrain.DecisionLog = DecisionLog
 
--- Tests replace this with fakes: { bridge = ..., hooks = ..., moods = ... (optional) }.
+-- Tests replace this with fakes: { bridge = ..., hooks = ..., moods = ..., control = ... (both optional) }.
 DecisionLog.override = nil
 
 local function deps()
     if DecisionLog.override ~= nil then return DecisionLog.override end
-    return { bridge = ALifeBrain.bridge, hooks = ALifeBrain.Hooks, moods = ALifeBrain.Moods }
+    return { bridge = ALifeBrain.bridge, hooks = ALifeBrain.Hooks, moods = ALifeBrain.Moods, control = ALifeBrain.Control }
 end
 
 function DecisionLog.reset()
     DecisionLog.last, DecisionLog.queue = {}, {}
     DecisionLog.window = { atMs = 0, count = 0 }
     DecisionLog.lastFlushMs, DecisionLog.sentNames = 0, false
-    DecisionLog.stats = { seen = 0, chosen = 0, sampled = 0, sent = 0, dropped = 0, failed = 0, labels = {},
+    DecisionLog.stats = { seen = 0, chosen = 0, sampled = 0, sent = 0, dropped = 0, failed = 0, labels = {}, picks = {},
         shadow = { decision = { n = 0, agree = 0 }, response = { n = 0, agree = 0 } } }
 end
 DecisionLog.reset()
@@ -79,16 +79,16 @@ function DecisionLog.loadPolicy(weights)
 end
 
 -- Hooks.installDecisionTap callback. moduleId is nil when A-Life fell back to its own logic;
--- chosen is true when the policy picked that module (Control.lua): not A-Life's choice, so it
--- is neither training data nor compared in shadow mode, only counted.
+-- chosen is true when the policy picked that module (Control.lua). Those rows are sampled
+-- too, marked "c" (not A-Life's choice: rl/ does not learn from them, shadow mode does not
+-- compare them) so a play session shows what the policy did; "ctl" marks rows recorded
+-- while policy control was on.
 function DecisionLog.onDecision(kind, actor, shell, context, moduleId, chosen)
     local stats, settings = DecisionLog.stats, DecisionLog.settings
     stats.seen = stats.seen + 1
     if type(actor) ~= "table" or type(actor.uid) ~= "string" then return end
-    if chosen == true then
-        stats.chosen = stats.chosen + 1
-        return
-    end
+    chosen = chosen == true
+    if chosen then stats.chosen = stats.chosen + 1 end
     local d = deps()
     -- The policy reads stored moods too, for NPCs not talked to in this session.
     if d.moods ~= nil then d.moods.want(actor.uid, d.hooks.nowMs()) end
@@ -118,16 +118,22 @@ function DecisionLog.onDecision(kind, actor, shell, context, moduleId, chosen)
     local allowed = d.hooks.allowedModules(kind, actor)
     local row = { d = kind, a = label, o = Features.rounded(vector, settings.digits), m = allowed, u = actor.uid,
         f = actor.factionId, p = actor.profileId, t = now }
-    if net ~= nil then
-        local choice = Policy.choose(net, vector, allowed)
-        row.pa = choice
-        local shadow = stats.shadow[kind]
-        shadow.n = shadow.n + 1
-        if choice == label then shadow.agree = shadow.agree + 1 end
+    if d.control ~= nil and d.control.enabled() then row.ctl = true end
+    local labelKey = kind .. ":" .. label
+    if chosen then
+        row.c, row.pa = true, label
+        stats.picks[labelKey] = (stats.picks[labelKey] or 0) + 1
+    else
+        if net ~= nil then
+            local choice = Policy.choose(net, vector, allowed)
+            row.pa = choice
+            local shadow = stats.shadow[kind]
+            shadow.n = shadow.n + 1
+            if choice == label then shadow.agree = shadow.agree + 1 end
+        end
+        stats.labels[labelKey] = (stats.labels[labelKey] or 0) + 1
     end
     stats.sampled = stats.sampled + 1
-    local labelKey = kind .. ":" .. label
-    stats.labels[labelKey] = (stats.labels[labelKey] or 0) + 1
     if collect then
         if #DecisionLog.queue >= settings.maxQueue then
             table.remove(DecisionLog.queue, 1)

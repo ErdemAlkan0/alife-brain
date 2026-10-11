@@ -46,6 +46,29 @@ def wall_clock_ms() -> int:
     return int(time.time() * 1000)
 
 
+def _counts(value: Any, limit: int) -> str:
+    """'key xN' for the largest counts of a {key: count} table (the game may send [] for {})."""
+    items = [(key, count) for key, count in (value.items() if isinstance(value, dict) else [])
+             if isinstance(count, (int, float)) and not isinstance(count, bool)]
+    items.sort(key=lambda item: -item[1])
+    return ", ".join(f"{key} x{int(count)}" for key, count in items[:limit])
+
+
+def policy_summary(data: dict) -> str:
+    """One log line for a policy_stats event (the game's Control.stats under policy control)."""
+    parts = []
+    for chain in ("decision", "response"):
+        stats = data.get(chain) if isinstance(data.get(chain), dict) else {}
+        parts.append(f"{chain}: asked {stats.get('asked', 0)}, ran {stats.get('ran', 0)}, nothing to do "
+                     f"{stats.get('declined', 0)}, near a player {stats.get('near', 0)}, left to A-Life "
+                     f"{stats.get('left', 0)}")
+    for label, key in (("ran", "modules"), ("left to A-Life", "reasons")):
+        counts = _counts(data.get(key), 8)
+        if counts:
+            parts.append(f"{label}: {counts}")
+    return "; ".join(parts)
+
+
 class HandlerError(Exception):
     """Raised by a handler to send ok=false with a short error code."""
 
@@ -294,8 +317,8 @@ class Sidecar:
     def _hello(self, request: Request, now: int) -> dict:
         meta = request.data if isinstance(request.data, dict) else {}
         log.info(
-            "hello from %s %s (game %s, A-Life %s)",
-            meta.get("mod"), meta.get("modVersion"), meta.get("game"), meta.get("alife"),
+            "hello from %s %s (game %s, A-Life %s, save %s)",
+            meta.get("mod"), meta.get("modVersion"), meta.get("game"), meta.get("alife"), request.world,
         )
         return {"version": __version__, "protocol": PROTOCOL, "sid": self.sid, "features": self.features,
                 "provider": getattr(self.provider, "name", None)}
@@ -318,8 +341,11 @@ class Sidecar:
             return
         self.events.append(ts=request.ts, received_ts=now, session=request.session, request_id=request.id,
                            event=request.data)
+        if request.data["kind"] == "policy_stats":
+            log.info("policy control: %s", policy_summary(request.data))
+            return
         if self.memory is not None:
-            apply_event(self.memory, request.data, request.ts)
+            apply_event(self.memory, request.data, request.ts, world=request.world)
         log.info("event %s %s", request.data.get("kind"), (request.data.get("npc") or {}).get("uid"))
 
     def _dialogue(self, request: Request, now: int) -> Deferred:
@@ -336,7 +362,8 @@ class Sidecar:
         settings = self.dialogue
         messages = build_messages(
             dialogue,
-            memories=self.memory.recall(npc, query=dialogue.text, now=now, limit=settings.memories),
+            memories=self.memory.recall(npc, query=dialogue.text, now=now, limit=settings.memories,
+                                        world=request.world),
             history=self.memory.recent_turns(uid, player_key, settings.history_turns),
             trust=trust,
             fear=fear,

@@ -216,6 +216,17 @@ function Hooks.nowMs()
     return math.floor(os.time() * 1000)
 end
 
+-- The save this game runs ("<game mode>/<save name>", the way the game's own save list names
+-- it), or nil.
+function Hooks.worldKey()
+    local key = nil
+    pcall(function()
+        local world = getWorld()
+        if world ~= nil then key = tostring(world:getGameMode()) .. "/" .. tostring(world:getWorld()) end
+    end)
+    return key
+end
+
 -- handler(player, listener, text, now) returns said, reason to answer instead of A-Life,
 -- or nil to let A-Life answer. Menu choices (choiceIntent ~= nil) always go to A-Life.
 function Hooks.installTalkHook(handler)

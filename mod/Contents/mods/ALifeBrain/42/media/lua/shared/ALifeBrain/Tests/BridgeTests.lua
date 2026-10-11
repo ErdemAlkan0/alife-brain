@@ -111,6 +111,20 @@ ALifeBrain.Tests.suite("Bridge", {
         check.same(got, { ok = true, data = { pong = true } })
     end },
 
+    { "names the save on every line", function(check)
+        local env = harness()
+        check.isNil(env.bridge:envelope("ping", {}).world, "no save known")
+        env.bridge:start({ mod = "test", world = "Apocalypse/11-10-2026_00-55" })
+        online(env)
+        env.bridge:request("ping", {}, function() end)
+        env.bridge:send("event", { kind = "npc_died" })
+        env.advance()
+        local sent = env.take()
+        check.equal(#sent, 2)
+        check.equal(sent[1].world, "Apocalypse/11-10-2026_00-55")
+        check.equal(sent[2].world, "Apocalypse/11-10-2026_00-55")
+    end },
+
     { "passes sidecar errors through", function(check)
         local env = harness()
         online(env)

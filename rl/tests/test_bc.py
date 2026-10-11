@@ -64,6 +64,15 @@ class DataTests(unittest.TestCase):
             self.assertNotIn(dataset.actions.index("orders"), set(dataset.labels.tolist()))
             self.assertIn("orders", dataset.actions, "still something the NPC may do")
 
+    def test_leaves_out_what_the_policy_picked(self):
+        with tempfile.TemporaryDirectory() as temp:
+            rows = synthetic_rows(60)
+            picked = [dict(row, label="investigate", chosen=True, control=True) for row in synthetic_rows(10)]
+            write_dataset(Path(temp), rows + picked + [dict(rows[0], control=True)])
+            dataset = load(Path(temp), "decision")
+            self.assertEqual(len(dataset), 61, "A-Life's choices under policy control still count")
+            self.assertNotIn("investigate", dataset.actions)
+
     def test_validation_holds_out_whole_npcs(self):
         with tempfile.TemporaryDirectory() as temp:
             write_dataset(Path(temp), synthetic_rows(400))

@@ -153,6 +153,8 @@ function Bridge:envelope(kind, data)
         ts = math.floor(self:now()),
         data = data,
     }
+    -- The save ("<game mode>/<save name>"): the sidecar keeps faction memories per save.
+    if type(self.meta) == "table" and type(self.meta.world) == "string" then message.world = self.meta.world end
     if self.sidecar.sid ~= nil and self.lastRseq > 0 then
         message.ack = { sid = self.sidecar.sid, rseq = self.lastRseq }
     end

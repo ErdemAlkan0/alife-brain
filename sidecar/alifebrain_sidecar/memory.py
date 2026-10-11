@@ -49,6 +49,16 @@ def _words(text: str) -> set[str]:
     return {word.lower() for word in _WORD.findall(text or "")}
 
 
+def faction_key(faction_id: str | None, world: str | None) -> str | None:
+    """Faction memories belong to one save. A-Life reuses role names (every police squad has a
+    "Deputy Rowe"), so a killing in another world must not reach this world's NPCs (play test,
+    2026-10-11: deputies blamed the player for deaths from older test saves). Memories written
+    before saves were told apart have no world and are no longer recalled in one."""
+    if not faction_id:
+        return None
+    return f"{world}|{faction_id}" if world else faction_id
+
+
 def settle(goal: float, elapsed_ms: int) -> float:
     """A drive halves every GOAL_HALF_LIFE_MS (Dialogue.goalNow in the game does the same)."""
     return goal * 0.5 ** (max(0, elapsed_ms) / GOAL_HALF_LIFE_MS)
@@ -173,14 +183,14 @@ class MemoryStore:
         self.db.commit()
         return True
 
-    def recall(self, npc: Npc, *, query: str = "", now: int, limit: int = 6) -> list[Memory]:
-        """Most useful memories across the three layers.
+    def recall(self, npc: Npc, *, query: str = "", now: int, limit: int = 6, world: str | None = None) -> list[Memory]:
+        """Most useful memories across the three layers (the faction's of this save: world).
 
         Score = importance + recency (+4 when fresh, halved after one real-time day)
         + 2 per word shared with the query; personal memories rank above squad, squad above
         faction.
         """
-        keys = [("personal", npc.uid), ("squad", npc.group_id), ("faction", npc.faction_id)]
+        keys = [("personal", npc.uid), ("squad", npc.group_id), ("faction", faction_key(npc.faction_id, world))]
         layer_bonus = {"personal": 2, "squad": 1, "faction": 0}
         query_words = _words(query)
         scored: list[tuple[float, Memory]] = []

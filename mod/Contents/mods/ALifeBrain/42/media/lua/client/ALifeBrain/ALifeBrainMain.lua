@@ -23,8 +23,10 @@ local Json, Bridge, Hooks = ALifeBrain.Json, ALifeBrain.Bridge, ALifeBrain.Hooks
 
 local Main = {
     settings = { pingIntervalMs = 10000, logEveryNthPong = 6, runTestsInDebug = true, modulesRefreshMs = 30000,
-        stealthMs = 500 },
+        stealthMs = 500, policyStatsMs = 300000 },
     lastPingAtMs = -math.huge,
+    policyStatsAtMs = 0,
+    policyAsked = 0,
     modulesAtMs = nil, -- set once our A-Life modules are in
     stealthAtMs = 0,
     pongs = 0,
@@ -118,10 +120,26 @@ function Main.onTick()
             ALifeBrain.Control.forget(now)
             ALifeBrain.Moods.forget(now)
         end
+        Main.reportPolicy(now)
     end
     if bridge:isOnline() and nowMs() - Main.lastPingAtMs >= Main.settings.pingIntervalMs then
         Main.ping()
     end
+end
+
+-- With policy control on, its counters go to the sidecar now and then ("policy_stats": the
+-- sidecar log and events.jsonl keep them, so a play session can be read afterwards).
+function Main.reportPolicy(now)
+    local Control, bridge = ALifeBrain.Control, ALifeBrain.bridge
+    if bridge == nil or not bridge:isOnline() or not Control.enabled() then return end
+    if now - Main.policyStatsAtMs < Main.settings.policyStatsMs then return end
+    Main.policyStatsAtMs = now
+    local s = Control.stats
+    local asked = s.decision.asked + s.response.asked
+    if asked == Main.policyAsked then return end
+    Main.policyAsked = asked
+    bridge:send("event", { kind = "policy_stats", decision = s.decision, response = s.response, modules = s.modules,
+        reasons = s.reasons })
 end
 
 function Main.reportHooks()
@@ -146,6 +164,7 @@ function Main.onGameStart()
         game = gameVersion(),
         alife = Hooks.aLifeVersion(),
         protocol = Bridge.PROTOCOL,
+        world = Hooks.worldKey(),
     })
     ALifeBrain.bridge = bridge
     log("bridge started session=" .. tostring(bridge.sessionId) .. "; waiting for sidecar")

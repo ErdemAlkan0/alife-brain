@@ -18,6 +18,7 @@ RES_TMP_FILE = "alifebrain_res.tmp"
 
 MAX_LINE_LENGTH = 16000
 MAX_ID_LENGTH = 200
+MAX_WORLD_LENGTH = 200
 
 _TYPE_PATTERN = re.compile(r"^[a-z_]{1,32}$")
 
@@ -40,6 +41,8 @@ class Request:
     ts: int
     data: Any
     ack: Ack | None
+    # The save the game runs ("<game mode>/<save name>"); faction memories are kept per save.
+    world: str | None = None
 
 
 def _require_string(message: dict, key: str, max_length: int = MAX_ID_LENGTH) -> str:
@@ -88,7 +91,15 @@ def parse_request(line: str) -> Request:
         ts=int(ts),
         data=message.get("data"),
         ack=_parse_ack(message.get("ack")),
+        world=_optional_world(message.get("world")),
     )
+
+
+def _optional_world(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    return value[:MAX_WORLD_LENGTH] if value else None
 
 
 def encode_line(payload: dict) -> str:

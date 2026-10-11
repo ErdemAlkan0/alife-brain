@@ -107,6 +107,19 @@ class ExperienceTests(unittest.TestCase):
         self.assertIn("The stranger killed Hobbs Scout.", texts)
         self.assertIn("The stranger killed Hobbs Scout, one of our people.", texts)
 
+    def test_faction_memories_stay_in_their_save(self):
+        # Play test (2026-10-11): deputies blamed the player for "Deputy Rowe" killed in an older test save.
+        died = {"kind": "npc_died", "by": {"kind": "player", "key": "sp:0"},
+                "npc": {"uid": "u2", "name": "Deputy Rowe", "factionId": "alife_police", "groupId": "g1"}}
+        apply_event(self.store, died, 1000)  # before saves were told apart: no world
+        apply_event(self.store, died, 2000, world="Apocalypse/old test")
+        colleague = Npc(uid="u9", faction_id="alife_police", group_id="g7")
+        def faction_texts(world):
+            return [m.text for m in self.store.recall(colleague, now=3000, world=world) if m.scope == "faction"]
+        self.assertEqual(faction_texts("Apocalypse/new game"), [])
+        self.assertEqual(faction_texts("Apocalypse/old test"), ["The stranger killed Deputy Rowe, one of our people."])
+        self.assertEqual(len(faction_texts(None)), 1, "a sidecar talking to an older mod still finds the old ones")
+
     def test_action_outcomes_become_memories_and_system_turns(self):
         base = {"kind": "npc_action", "by": {"kind": "player", "key": "sp:0"},
                 "npc": {"uid": "u1", "name": "Henry"}}

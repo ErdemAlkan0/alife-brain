@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from .memory import MemoryStore, Npc
+from .memory import MemoryStore, Npc, faction_key
 
 HIT_TRUST, HIT_FEAR = -10, 8
 REPEAT_WINDOW_MS = 60_000
@@ -102,8 +102,9 @@ def _apply_action(store: MemoryStore, npc: Npc, player_key: str, event: dict, ts
                             importance=importance, player_key=player_key)
 
 
-def apply_event(store: MemoryStore, event: Any, ts: int) -> int:
-    """Records what the event means to the NPC and its squad. Returns memories written."""
+def apply_event(store: MemoryStore, event: Any, ts: int, world: str | None = None) -> int:
+    """Records what the event means to the NPC and its squad (and, for a killing, its faction
+    in this save: world). Returns memories written."""
     if not isinstance(event, dict):
         return 0
     npc = _npc(event)
@@ -137,7 +138,8 @@ def apply_event(store: MemoryStore, event: Any, ts: int) -> int:
         if by_player:
             written += store.add_memory("squad", npc.group_id, ts=ts, kind="killed_by_player", importance=9,
                                         player_key=player_key, text=f"The stranger killed {who}.")
-            written += store.add_memory("faction", npc.faction_id, ts=ts, kind="killed_by_player", importance=6,
+            written += store.add_memory("faction", faction_key(npc.faction_id, world), ts=ts, kind="killed_by_player",
+                                        importance=6,
                                         player_key=player_key, text=f"The stranger killed {who}, one of our people.")
         elif by.get("kind") == "zombie":
             written += store.add_memory("squad", npc.group_id, ts=ts, kind="killed_by_zombie", importance=6,

@@ -283,14 +283,28 @@ end
 local actor = { uid = "palife:9", factionId = "alife_church_volunteers", profileId = "volunteer" }
 
 ALifeBrain.Tests.suite("DecisionLog", {
-    { "a module the policy picked is neither training data nor compared", run(true, function(check, env)
+    { "a module the policy picked is logged as the policy's, not compared", run(true, function(check, env)
         DecisionLog.nets = { decision = tinyNet() }
         DecisionLog.onDecision("decision", actor, {}, {}, "regroup", true)
-        check.equal(#DecisionLog.queue, 0)
+        check.equal(#DecisionLog.queue, 1)
+        local row = DecisionLog.queue[1]
+        check.same({ row.a, row.c, row.pa }, { "regroup", true, "regroup" })
         check.equal(DecisionLog.stats.shadow.decision.n, 0)
-        check.equal(DecisionLog.stats.chosen, 1)
-        DecisionLog.onDecision("decision", actor, {}, {}, "regroup", false)
-        check.equal(#DecisionLog.queue, 1, "A-Life's own choice still is")
+        check.same({ DecisionLog.stats.chosen, DecisionLog.stats.picks["decision:regroup"] }, { 1, 1 })
+        check.isNil(DecisionLog.stats.labels["decision:regroup"], "A-Life's choices are counted apart")
+        env.now = env.now + DecisionLog.settings.samplePeriodMs
+        DecisionLog.onDecision("decision", actor, {}, {}, "orders", false)
+        check.isNil(DecisionLog.queue[2].c, "A-Life's own choice")
+        check.equal(DecisionLog.stats.shadow.decision.n, 1)
+    end) },
+    { "marks rows recorded while policy control is on", run(true, function(check, env)
+        local on = false
+        DecisionLog.override.control = { enabled = function() return on end }
+        DecisionLog.onDecision("decision", actor, {}, {}, "regroup")
+        on = true
+        DecisionLog.onDecision("response", actor, {}, {}, "flee")
+        check.isNil(DecisionLog.queue[1].ctl)
+        check.equal(DecisionLog.queue[2].ctl, true)
     end) },
     { "samples a choice once per period, and every change", run(true, function(check, env)
         DecisionLog.onDecision("decision", actor, {}, {}, "regroup")

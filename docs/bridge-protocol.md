@@ -24,12 +24,16 @@ Bütün satırlar **ASCII** JSON'dur (ASCII dışı karakterler `\uXXXX`), bu y�
 ## Lua → sidecar (istek satırı)
 
 ```json
-{"v":1,"id":"<sess>:<seq>","sess":"<sess>","type":"ping","ts":1759951234567,"data":{...},"ack":{"sid":"a1b2c3d4","rseq":7}}
+{"v":1,"id":"<sess>:<seq>","sess":"<sess>","type":"ping","ts":1759951234567,"world":"Apocalypse/<kayıt adı>","data":{...},"ack":{"sid":"a1b2c3d4","rseq":7}}
 ```
 
 - `sess`: oyun açılışında üretilir (`<ms>-<rastgele>`). Her yeni oyun yüklemesinde değişir.
 - `id`: oturum içinde benzersiz; cevaplar `re` alanında buna atıf yapar.
 - `ts`: Lua'nın `getTimestampMs()` değeri (duvar saati, ms).
+- `world` (isteğe bağlı): oynanan kayıt, `<oyun modu>/<kayıt adı>` (`Hooks.worldKey`, oyunun kendi kayıt
+  listesindeki gibi). Sidecar fraksiyon anılarını kayıt başına tutar (`memory.faction_key`): A-Life rol adlarını
+  her ekipte tekrar kullanır ("Deputy Rowe"), eski bir test kaydındaki ölüm yeni dünyaya karışmasın. `world`
+  olmadan yazılmış eski fraksiyon anıları bir kayıtta artık okunmaz.
 - `ack` (isteğe bağlı): Lua'nın o sidecar örneğinden (`sid`) işlediği en büyük `rseq`. Her mesaja eklenir; gönderilecek
   başka bir şey yoksa en fazla saniyede bir ayrı bir `ack` mesajı gider.
 - `type` değerleri (v1): `hello`, `ping`, `event`, `dialogue`, `history`, `moods`, `ack`. `event` ve `ack` için cevap satırı yazılmaz
@@ -115,11 +119,18 @@ hafızaya ve `events.jsonl`'e girmez:
 - `d`: A-Life zinciri (`decision` tehdit yokken, `response` tehdide), `a`: kazanan modül id'si ya da `default`
   (A-Life'ın kendi geri düşüşü), `o`: `Features.vector` (3 hane yuvarlanmış), `m`: o NPC'nin o zincirde izinli
   modülleri, `pa`: gölge modundaki policy'nin seçimi (eğitilmiş ağırlık varsa).
+- `c: true` (sidecar `chosen`): modülü policy kontrolü seçti (`Control.lua`); A-Life'ın seçimi değildir, `rl/`
+  bundan öğrenmez, gölge modu karşılaştırmaz. `ctl: true` (`control`): satır policy kontrolü açıkken kaydedildi.
 - `names` her bağlantıda ilk partiyle bir kez gelir. Parti en çok 12 satır (satır sınırının altında kalsın diye).
 - Sidecar geçerli satırları `<veri klasörü>/dataset/decisions-<tarih>.jsonl`, adları `schema-<n>.json` dosyasına yazar.
   Özellik listesi değişirse `Features.SCHEMA` artırılır; eski şemanın verisi ayrı kalır.
 
 ### `event` türleri
+
+`policy_stats` (policy kontrolü açıkken 5 dakikada bir, `ALifeBrainMain.reportPolicy`): `Control.stats`
+(`decision` / `response`: `asked`, `ran`, `declined` = yapacak işi yoktu, `near` = oyuncu yakındı, `left` = A-Life'a
+bırakıldı; `modules`: çalıştırılan modüller; `reasons`: neden bırakıldığı). `sidecar.log`'a bir satır yazılır ve
+`events.jsonl`'de kalır; hafızaya girmez.
 
 `npc_hit`, `npc_died` (EventLog.lua) ve `npc_action` (Dialogue.lua): `{"kind": "npc_action", "action":
 "give|follow|stay|leave|trade", "ok": true, "item": "water", "label": "Water Bottle", "given": ["..."] (NPC'den

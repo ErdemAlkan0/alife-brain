@@ -33,6 +33,14 @@ class ParseRequestTests(unittest.TestCase):
         request = parse_request(json.dumps(message))
         self.assertIsNone(request.data)
         self.assertIsNone(request.ack)
+        self.assertIsNone(request.world)
+
+    def test_reads_the_save(self):
+        message = json.loads(line())
+        message["world"] = " Apocalypse/11-10-2026_00-55 "
+        self.assertEqual(parse_request(json.dumps(message)).world, "Apocalypse/11-10-2026_00-55")
+        message["world"] = 7
+        self.assertIsNone(parse_request(json.dumps(message)).world)
 
     def test_rejects_malformed_lines(self):
         bad = [

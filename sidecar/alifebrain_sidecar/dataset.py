@@ -119,4 +119,9 @@ class DatasetStore:
             value = _id(row.get(key))
             if value is not None:
                 record[field] = value
+        # chosen: the policy picked this module (policy control), so the label is not A-Life's
+        # choice and rl/ does not learn from it; control: policy control was on at the time.
+        for key, field in (("c", "chosen"), ("ctl", "control")):
+            if row.get(key) is True:
+                record[field] = True
         return record

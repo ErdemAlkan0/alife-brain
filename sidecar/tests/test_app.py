@@ -7,6 +7,7 @@ from alifebrain_sidecar.app import Sidecar
 from alifebrain_sidecar.dataset import DatasetStore
 from alifebrain_sidecar.events import EventStore
 from alifebrain_sidecar.files import FileBridge
+from alifebrain_sidecar.memory import MemoryStore
 from alifebrain_sidecar.protocol import CLAIMED_FILE, REQ_FILE, RES_FILE
 
 
@@ -143,6 +144,21 @@ class RequestHandlingTests(SidecarTestCase):
         self.assertEqual(self.sidecar.stats["samples"], 1)
         self.assertFalse(self.events_path.exists(), "samples are training data, not memories")
         self.assertTrue((Path(self._tmp.name) / "data" / "dataset" / "decisions-d.jsonl").exists())
+
+    def test_policy_stats_are_logged_and_kept_but_are_no_memory(self):
+        self.sidecar.memory = MemoryStore(":memory:")
+        data = {"kind": "policy_stats", "decision": {"asked": 40, "ran": 12, "declined": 20, "near": 3, "left": 9},
+                "response": {"asked": 5, "ran": 1}, "modules": {"decision:investigate": 9, "decision:fortify": 3},
+                "reasons": []}
+        self.send("event", data)
+        with self.assertLogs("alifebrain_sidecar.app", level="INFO") as logs:
+            self.sidecar.step()
+        line = next(message for message in logs.output if "policy control" in message)
+        self.assertIn("decision: asked 40, ran 12, nothing to do 20", line)
+        self.assertIn("ran: decision:investigate x9, decision:fortify x3", line)
+        records = [json.loads(text) for text in self.events_path.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(records[0]["event"]["kind"], "policy_stats")
+        self.sidecar.memory.close()
 
     def test_event_without_kind_is_rejected(self):
         self.send("event", {"npc": {}})

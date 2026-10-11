@@ -212,4 +212,8 @@ Kontrol açıkken:
 - kararın kaç kez ve neden A-Life'a bırakıldığı.
 
 Gölge modu istatistikleri yalnızca A-Life'ın kendi seçtiği kararları sayar. Policy'nin çalıştırdığı kararlar
-eğitim verisine girmez.
+veri setine işaretli yazılır (`chosen`) ama eğitime girmez. Kontrol açıkken sayaçlar 5 dakikada bir `sidecar.log`'a da
+yazılır ("policy control: ..."), yani oynanıştan sonra konsola bakmadan okunabilir.
+
+Takip: LLM takibi kabul ederse NPC, oyuncuya güvensiz (güven < 0) ya da düşman değilse takip eder. Hafıza: fraksiyon
+anıları kayıt (save) başınadır; eski bir kayıtta öldürdüğün biri yeni dünyadaki NPC'lerin hafızasına girmez.
