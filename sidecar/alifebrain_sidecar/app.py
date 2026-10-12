@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from . import __version__
-from .config import DialogueSettings
+from .config import DialogueSettings, MemorySettings
 from .dataset import DatasetStore
 from .dialogue import BadRequest, InvalidReply, build_messages, parse_reply
 from .dialogue import parse_request as parse_dialogue
@@ -34,6 +34,7 @@ from .protocol import (
     response_payload,
     status_payload,
 )
+from .summary import InvalidSummary, build_summary_messages, parse_summary
 
 log = logging.getLogger(__name__)
 
@@ -82,6 +83,12 @@ class Deferred:
 
 
 @dataclass
+class SummaryJob:
+    candidate: Any
+    future: Future
+
+
+@dataclass
 class Outgoing:
     rseq: int
     created_ms: int
@@ -99,6 +106,7 @@ class Sidecar:
         dataset: DatasetStore | None = None,
         provider: Any = None,
         dialogue: DialogueSettings | None = None,
+        memory_settings: MemorySettings | None = None,
         executor: Executor | None = None,
         health_interval_ms: int = 60_000,
         clock: Callable[[], int] = wall_clock_ms,
@@ -114,6 +122,7 @@ class Sidecar:
         self.dataset = dataset
         self.provider = provider
         self.dialogue = dialogue or DialogueSettings()
+        self.memory_settings = memory_settings or MemorySettings()
         self.executor = executor or ThreadPoolExecutor(max_workers=2, thread_name_prefix="alifebrain")
         self.health_interval_ms = health_interval_ms
         self.clock = clock
@@ -135,6 +144,9 @@ class Sidecar:
         self.health_future: Future | None = None
         self.last_health_ms: int | None = None
         self.health_ok: bool | None = None
+        self.summary_job: SummaryJob | None = None
+        self.last_summary_ms: int | None = None
+        self.summary_retry: dict[tuple[str, str], int] = {}
 
         self.handlers: dict[str, Callable[[Request, int], Any]] = {
             "hello": self._hello,
@@ -167,6 +179,7 @@ class Sidecar:
         for line in self.bridge.claim():
             self._handle_line(line, now)
         self._collect()
+        self._maybe_summarize(now)
         self._check_health(now)
         self._prune(now)
         due = self.last_publish_ms is None or now - self.last_publish_ms >= self.heartbeat_ms
@@ -260,6 +273,48 @@ class Sidecar:
             else:
                 self._reply(request, now, ok=True, data=data)
         self.inflight = pending
+
+    def _maybe_summarize(self, now: int) -> None:
+        """Rewrites one layer's old memories into a summary now and then, while no reply is
+        being written (summary.py). A failed one is tried again after summary_retry_s."""
+        settings = self.memory_settings
+        if self.memory is None or self.provider is None or not settings.summarize:
+            return
+        job = self.summary_job
+        if job is not None:
+            if not job.future.done():
+                return
+            self.summary_job = None
+            key = (job.candidate.scope, job.candidate.key)
+            try:
+                summary = parse_summary(job.future.result())
+            except (LLMError, InvalidSummary) as error:
+                self.summary_retry[key] = now + settings.summary_retry_s * 1000
+                self._count("summary_failed")
+                log.warning("memory summary for %s %s failed: %s", key[0], key[1], error)
+                return
+            except Exception:
+                self.summary_retry[key] = now + settings.summary_retry_s * 1000
+                log.exception("memory summary for %s %s failed", key[0], key[1])
+                return
+            self.memory.apply_summary(job.candidate, summary)
+            self._count("summaries")
+            log.info("summarized %d old memories of %s %s: %r", len(job.candidate.ids), key[0], key[1], summary)
+            return
+        if self.inflight or self.health_ok is False:
+            return
+        if self.last_summary_ms is not None and now - self.last_summary_ms < settings.summary_every_s * 1000:
+            return
+        self.summary_retry = {key: until for key, until in self.summary_retry.items() if until > now}
+        candidate = self.memory.summary_candidate(after=settings.summary_after, keep_recent=settings.keep_recent,
+                                                  skip=set(self.summary_retry))
+        self.last_summary_ms = now
+        if candidate is None:
+            return
+        messages = build_summary_messages(candidate, self.memory.layer_name(candidate.scope, candidate.key))
+        self.summary_job = SummaryJob(candidate, self.executor.submit(
+            self.provider.chat, messages, max_tokens=settings.summary_max_tokens, temperature=0.3,
+            timeout=self.dialogue.timeout_s))
 
     def _check_health(self, now: int) -> None:
         health = getattr(self.provider, "health", None)
@@ -360,18 +415,22 @@ class Sidecar:
         npc = self.memory.npc(uid) or dialogue.npc
         trust, fear = self.memory.mood(uid, player_key)
         settings = self.dialogue
+        history = self.memory.recent_turns(uid, player_key, settings.history_turns)
+        goal = self.memory.drive(uid, now)
         messages = build_messages(
             dialogue,
             memories=self.memory.recall(npc, query=dialogue.text, now=now, limit=settings.memories,
                                         world=request.world),
-            history=self.memory.recent_turns(uid, player_key, settings.history_turns),
+            history=history,
             trust=trust,
             fear=fear,
-            goal=self.memory.drive(uid, now),
+            goal=goal,
+            summaries=self.memory.summaries(npc, world=request.world),
         )
+        compact = build_messages(dialogue, memories=[], history=history[-2:], trust=trust, fear=fear, goal=goal,
+                                 compact=True)
         log.debug("dialogue prompt for %s:\n%s", uid, "\n---\n".join(m["content"] for m in messages))
-        future = self.executor.submit(self.provider.chat, messages, max_tokens=settings.max_tokens,
-                                      temperature=settings.temperature, timeout=settings.timeout_s)
+        future = self.executor.submit(self._ask_llm, messages, compact)
 
         def finish(text: str) -> dict:
             try:
@@ -410,6 +469,24 @@ class Sidecar:
                     "fear": new_fear, "goalDelta": reply.goal_delta, "goal": new_goal}
 
         return Deferred(future, finish)
+
+    def _ask_llm(self, messages: list[dict], compact: list[dict] | None) -> str:
+        """The reply to messages (runs on a worker thread). When the provider refuses them with
+        HTTP 400 (Player2: "user input rejected", a content filter it seems, now and then tripped
+        by a war-torn prompt: play test 2026-10-11, twice in a day, the same request refused
+        again on retry), asks once more with the short prompt, if there is time left for it."""
+        settings = self.dialogue
+        started = time.monotonic()
+        try:
+            return self.provider.chat(messages, max_tokens=settings.max_tokens, temperature=settings.temperature,
+                                      timeout=settings.timeout_s)
+        except LLMError as error:
+            spent = time.monotonic() - started
+            if compact is None or error.code != "http_400" or spent > settings.timeout_s / 2:
+                raise
+            log.info("the LLM refused the full prompt (%s); asking again with the short one", error.detail[:80])
+            return self.provider.chat(compact, max_tokens=settings.max_tokens, temperature=settings.temperature,
+                                      timeout=max(5.0, settings.timeout_s - spent))
 
     def _history(self, request: Request, now: int) -> dict:
         """Earlier conversation with one NPC, for the chat window."""

@@ -65,6 +65,10 @@ Hooks.touchpoints = {
     { path = "Reputation.playerKey", side = "server" },
     { path = "TalkInput.say", side = "client" },
     { path = "TalkInput.open", side = "client" },
+    { path = "Persistence.squadCap", side = "server", kind = "number" },
+    { path = "ModuleRobbery.active", side = "server", kind = "table" },
+    { path = "Telemetry.events", side = "server", kind = "table" },
+    { path = "Telemetry.counters", side = "server", kind = "table" },
 }
 
 local function resolve(path)
@@ -123,6 +127,17 @@ local function modDataOf(object)
         data = object:getModData()
     end)
     return type(data) == "table" and data or nil
+end
+
+local function xyzOf(object)
+    local x, y, z = nil, nil, nil
+    pcall(function() x, y, z = object:getX(), object:getY(), object:getZ() end)
+    return x, y, z
+end
+
+local function flatDistance(ax, ay, bx, by)
+    local dx, dy = ax - bx, ay - by
+    return math.sqrt(dx * dx + dy * dy)
 end
 
 local function variableOf(object, name)
@@ -472,7 +487,9 @@ function Hooks.giveItem(record, shell, player, name)
     if Hooks.SUPPLY_INTENTS[name] == nil or rules == nil or type(rules.matches) ~= "function" then
         return false, "refused"
     end
-    if Hooks.inCombat(record) or Hooks.stance(record, player) == "hostile" then return false, "refused" end
+    -- In a fight: "combat" (play test, 2026-10-11: a gift handed over mid-fight read as "could not do it").
+    if Hooks.inCombat(record) then return false, "combat" end
+    if Hooks.stance(record, player) == "hostile" then return false, "refused" end
     if not Hooks.withinReach(player, shell, 6) or not Hooks.lineOfSight(player, shell) then return false, "too_far" end
     local result, detail = false, "refused"
     pcall(function()
@@ -648,7 +665,9 @@ end
 -- every move is undone, so either the whole trade happens or nothing does.
 -- Returns true, givenNames (NPC -> player), receivedNames (player -> NPC), or false, reason.
 function Hooks.executeTrade(record, shell, player, offeredItems, asked)
-    if Hooks.inCombat(record) or Hooks.stance(record, player) == "hostile" then return false, "refused" end
+    -- In a fight: "combat" (play test, 2026-10-11: a gift handed over mid-fight read as "could not do it").
+    if Hooks.inCombat(record) then return false, "combat" end
+    if Hooks.stance(record, player) == "hostile" then return false, "refused" end
     if not Hooks.withinReach(player, shell, 6) or not Hooks.lineOfSight(player, shell) then return false, "too_far" end
     for _, item in ipairs(offeredItems) do
         if not Hooks.playerCanTrade(player, item) then return false, "changed" end
@@ -731,7 +750,10 @@ end
 -- debugSpawnCatalog while its diagnostics are on, so this switches them on first.
 -- Works in single player and for admins. factionId picks the faction (catalog ids such as
 -- "alife_church_volunteers"); without it A-Life picks any faction, usually a hostile one.
-function Hooks.spawnTestNpc(player, encounterId, count, distance, factionId)
+-- persistent (default true): A-Life keeps them like a placed encounter (anchored). Without it
+-- a debug spawn is expendable: once the player is away (dormant) for A-Life's "Unvisited NPC
+-- lifetime" (sandbox, 8 world hours by default) it is deleted (play test, 2026-10-11).
+function Hooks.spawnTestNpc(player, encounterId, count, distance, factionId, persistent)
     if player == nil or type(sendClientCommand) ~= "function" then return false, "no_player" end
     local x, y, z = math.floor(player:getX()), math.floor(player:getY()), math.floor(player:getZ())
     sendClientCommand(player, "ProjectALife", "alifeDiagnostics", { enabled = true, recorder = false })
@@ -740,8 +762,271 @@ function Hooks.spawnTestNpc(player, encounterId, count, distance, factionId)
         factionId = factionId,
         count = tonumber(count) or 1,
         x = x + (tonumber(distance) or 6), y = y, z = z,
+        persistent = persistent ~= false,
     })
     return true
+end
+
+local function catalogName(profileId)
+    local name = nil
+    pcall(function()
+        local profile = ProjectALife.Catalog.npc(profileId)
+        if type(profile) == "table" and type(profile.general) == "table" then name = profile.general.name end
+    end)
+    return name
+end
+
+-- Kept by A-Life's population cleanup? The same test as its Population.expendable, plus the
+-- groups its persistence keeps (squads, outposts).
+local function keptByALife(memory)
+    local admin = type(memory.admin) == "table" and memory.admin or nil
+    return memory.persistent == true or (admin ~= nil and admin.persistent == true) or memory.adminAnchor == true
+        or memory.encounter ~= nil or memory.squadId ~= nil or memory.outpostId ~= nil
+end
+
+-- Debug (read only): A-Life's actors as rows { uid, name, faction, lifecycle, kept, debug,
+-- distance } nearest first, and counts per lifecycle.
+function Hooks.actorSnapshot(player)
+    local rows, counts = {}, {}
+    local each = resolve("ActorRegistry.each")
+    if type(each) ~= "function" then return rows, counts end
+    local px, py = nil, nil
+    if player ~= nil then pcall(function() px, py = player:getX(), player:getY() end) end
+    local bindings = resolve("Watchdog.bindings")
+    pcall(each, function(record)
+        local memory = type(record.memory) == "table" and record.memory or {}
+        local position = record.worldPosition
+        local binding = type(bindings) == "table" and bindings[record.uid] or nil
+        if record.lifecycle == "active" and type(binding) == "table" and binding.shell ~= nil then
+            pcall(function() position = { x = binding.shell:getX(), y = binding.shell:getY() } end)
+        end
+        local distance = nil
+        if px ~= nil and type(position) == "table" and tonumber(position.x) ~= nil and tonumber(position.y) ~= nil then
+            distance = math.sqrt((position.x - px) ^ 2 + (position.y - py) ^ 2)
+        end
+        local lifecycle = tostring(record.lifecycle)
+        counts[lifecycle] = (counts[lifecycle] or 0) + 1
+        rows[#rows + 1] = { uid = record.uid, name = catalogName(record.profileId), faction = record.factionId,
+            lifecycle = lifecycle, kept = keptByALife(memory), debug = memory.debugSpawn == true, distance = distance }
+    end)
+    table.sort(rows, function(a, b)
+        if a.distance == nil then return false end
+        if b.distance == nil then return true end
+        return a.distance < b.distance
+    end)
+    return rows, counts
+end
+
+-- Keeping NPCs the player has met (Keeper.lua) -------------------------------------
+-- A-Life writes only persistent groups into the save (Core/ALifePersistence.lua forSave:
+-- squads of its offline ledger, outposts, and groups whose memory says persistent, up to the
+-- sandbox "Saved group limit"); every other NPC lives for one session, and a dormant one is
+-- also deleted after "Unvisited NPC lifetime" (World/ALifePopulation.lua expendable). The
+-- same memory flag A-Life's own persistent encounters carry keeps an NPC: persistent = true,
+-- written through Talk.writeMemory (a versioned registry update, saved with the world).
+-- alifeBrainKeptAtMs marks the ones we kept, so Hooks.releaseKept can undo it.
+
+-- uids of living A-Life NPCs within tiles of a player (A-Life's perception snapshot).
+function Hooks.actorsNearPlayers(tiles)
+    local snapshot = resolve("Perception.zombieSnapshot")
+    local out = {}
+    if type(snapshot) ~= "table" or type(snapshot.actors) ~= "table" then return out end
+    local players = {}
+    if type(getNumActivePlayers) == "function" then
+        for index = 0, getNumActivePlayers() - 1 do
+            local player = getSpecificPlayer(index)
+            if player ~= nil and not player:isDead() then
+                local px, py = xyzOf(player)
+                if px ~= nil then players[#players + 1] = { x = px, y = py } end
+            end
+        end
+    end
+    for _, sampled in ipairs(snapshot.actors) do
+        local sx, sy = tonumber(sampled.x), tonumber(sampled.y)
+        if sx ~= nil then
+            for _, at in ipairs(players) do
+                if flatDistance(sx, sy, at.x, at.y) <= tiles then
+                    local data = modDataOf(sampled.body)
+                    local uid = data ~= nil and data.ProjectALifeUID or nil
+                    if type(uid) == "string" then out[#out + 1] = uid end
+                    break
+                end
+            end
+        end
+    end
+    return out
+end
+
+-- Keeps the NPC and its whole group (A-Life saves by group; a half-kept squad would come back
+-- split). Returns "kept" (with how many NPCs were marked) | "already" (A-Life keeps it) |
+-- "managed" (offline squad or outpost task squad: A-Life brings those back itself) | nil, reason.
+function Hooks.keepGroupOf(uid, now)
+    local peek, each, current = resolve("ActorRegistry.peek"), resolve("ActorRegistry.each"), talk()
+    if type(peek) ~= "function" or type(each) ~= "function" or current == nil or type(current.writeMemory) ~= "function" then
+        return nil, "alife_unavailable"
+    end
+    local okRead, record = pcall(peek, uid)
+    if not okRead or type(record) ~= "table" then return nil, "unknown" end
+    if record.lifecycle == "dead" then return nil, "dead" end
+    local memory = type(record.memory) == "table" and record.memory or {}
+    if memory.sessionOnly == true or memory.outpostSquadId ~= nil or memory.squadId ~= nil then return "managed" end
+    if keptByALife(memory) then return "already" end
+    local members = { uid }
+    local group = memory.groupId
+    if group ~= nil then
+        members = {}
+        pcall(each, function(other)
+            local theirs = type(other.memory) == "table" and other.memory or {}
+            if theirs.groupId == group and other.lifecycle ~= "dead" and not keptByALife(theirs) then
+                members[#members + 1] = other.uid
+            end
+        end)
+    end
+    local marked = 0
+    for _, member in ipairs(members) do
+        local ok, written = pcall(current.writeMemory, member, function(m)
+            m.persistent = true
+            m.alifeBrainKeptAtMs = now
+        end)
+        if ok and written == true then marked = marked + 1 end
+    end
+    if marked == 0 then return nil, "write_failed" end
+    return "kept", marked
+end
+
+-- Groups A-Life will try to write into the save, against its limit (Persistence.squadCap):
+-- the same grouping as Persistence.forSave, without its outpost-resident exception.
+function Hooks.savedGroups()
+    local each, cap = resolve("ActorRegistry.each"), resolve("Persistence.squadCap")
+    local groups, count, ours = {}, 0, 0
+    if type(each) ~= "function" then return 0, tonumber(cap), 0 end
+    pcall(each, function(record)
+        local m = type(record.memory) == "table" and record.memory or {}
+        if record.lifecycle ~= "dead" and m.sessionOnly ~= true and m.outpostSquadId == nil and m.squadId == nil
+                and keptByALife(m) then
+            local id = m.outpostId ~= nil and ("outpost:" .. tostring(m.outpostId)) or tostring(m.groupId or m.encounter or record.uid)
+            if not groups[id] then
+                groups[id], count = true, count + 1
+                if m.alifeBrainKeptAtMs ~= nil then ours = ours + 1 end
+            end
+        end
+    end)
+    return count, tonumber(cap), ours
+end
+
+-- Undoes our keeping (the NPCs A-Life did not keep on its own become expendable again).
+function Hooks.releaseKept()
+    local each, current = resolve("ActorRegistry.each"), talk()
+    if type(each) ~= "function" or current == nil or type(current.writeMemory) ~= "function" then return 0 end
+    local uids = {}
+    pcall(each, function(record)
+        if type(record.memory) == "table" and record.memory.alifeBrainKeptAtMs ~= nil then uids[#uids + 1] = record.uid end
+    end)
+    local released = 0
+    for _, uid in ipairs(uids) do
+        local ok, written = pcall(current.writeMemory, uid, function(m)
+            m.persistent = nil
+            m.alifeBrainKeptAtMs = nil
+        end)
+        if ok and written == true then released = released + 1 end
+    end
+    return released
+end
+
+-- Trust lets the player close (Rapport.lua) ------------------------------------------
+-- A careful group (Relations.playerStance "careful", from the faction's view of the player)
+-- warns a player who comes close and opens fire when the warnings are walked through
+-- (Behaviours/ALifeModuleCareful.lua: keep back -> last warning -> hostile). A-Life's own way
+-- out is memory.tolerateUntil[playerKey] = untilMs: while it lasts "careful" reads as
+-- "neutral" (Decisions/ALifeRelations.lua) and the warnings stop. Talk.tolerate writes it for
+-- the NPC's whole group or outpost; A-Life does so itself, for 8 minutes, when an NPC agrees
+-- to walk together. Hostile stays hostile, and a hit still turns the group.
+
+-- The group A-Life warns and tolerates as one (ModuleCareful's groupOf).
+function Hooks.groupKey(record)
+    local memory = type(record) == "table" and type(record.memory) == "table" and record.memory or {}
+    if memory.outpostId ~= nil then return "outpost:" .. tostring(memory.outpostId) end
+    if memory.groupId ~= nil then return tostring(memory.groupId) end
+    return "solo:" .. tostring(type(record) == "table" and record.uid or nil)
+end
+
+-- A-Life's stored record (no copy), or nil.
+function Hooks.peekRecord(uid)
+    local peek = resolve("ActorRegistry.peek")
+    if type(uid) ~= "string" or type(peek) ~= "function" then return nil end
+    local ok, record = pcall(peek, uid)
+    return ok and type(record) == "table" and record or nil
+end
+
+-- Until when (ms) the NPC tolerates the player, or nil.
+function Hooks.toleratedUntil(record, player)
+    local key = Hooks.playerKey(player)
+    local memory = type(record) == "table" and type(record.memory) == "table" and record.memory or nil
+    if key == nil or memory == nil or type(memory.tolerateUntil) ~= "table" then return nil end
+    return tonumber(memory.tolerateUntil[key])
+end
+
+-- Writes the tolerance for the NPC's whole group; untilMs = now ends it.
+function Hooks.tolerate(record, player, untilMs)
+    local current, key = talk(), Hooks.playerKey(player)
+    if current == nil or type(current.tolerate) ~= "function" or key == nil or type(record) ~= "table" then
+        return false
+    end
+    return pcall(current.tolerate, record, key, untilMs) == true
+end
+
+function Hooks.nameOf(record)
+    return type(record) == "table" and catalogName(record.profileId) or nil
+end
+
+-- Robberies (Robberies.lua) ------------------------------------------------------------
+-- A-Life's ModuleRobbery keeps each robbery of a player in Robbery.active (id -> state:
+-- members, player, phase, taken = item full types) until Robbery.finish removes it and
+-- writes state.finishedReason ("released", "execute:<why>", "player_gone", "crew_gone",
+-- "interrupted"). Read only: we keep the state tables we saw and report how each ended.
+
+function Hooks.activeRobberies()
+    local active = resolve("ModuleRobbery.active")
+    return type(active) == "table" and active or {}
+end
+
+-- An NPC as the sidecar's events describe it, from A-Life's registry (no body needed).
+function Hooks.describeRecord(uid)
+    local peek = resolve("ActorRegistry.peek")
+    if type(uid) ~= "string" or type(peek) ~= "function" then return nil end
+    local ok, record = pcall(peek, uid)
+    if not ok or type(record) ~= "table" then return { uid = uid } end
+    local memory = type(record.memory) == "table" and record.memory or {}
+    return { uid = uid, name = catalogName(record.profileId), factionId = record.factionId,
+        groupId = memory.groupId, profileId = record.profileId }
+end
+
+-- The name a player sees for an item type ("Base.Hammer" -> "Hammer"), or the type.
+function Hooks.itemName(fullType)
+    local name = nil
+    pcall(function()
+        local item = getScriptManager():FindItem(fullType)
+        if item ~= nil then name = item:getDisplayName() end
+    end)
+    return name or tostring(fullType)
+end
+
+Hooks.LIFECYCLE_EVENTS = { actor_removed = true, dead_actors_pruned = true, spawn_failed = true,
+    spawn_rollback = true, orphan_shell_removed = true }
+
+-- Debug (read only): A-Life's recent lifecycle telemetry (its ring buffer since this load)
+-- and its counters, e.g. actor_removed { uid, reason = "dormant_ttl" }.
+function Hooks.lifecycleEvents()
+    local out = {}
+    local events, counters = resolve("Telemetry.events"), resolve("Telemetry.counters")
+    for _, event in ipairs(type(events) == "table" and events or {}) do
+        if type(event) == "table" and Hooks.LIFECYCLE_EVENTS[event.category] then out[#out + 1] = event end
+    end
+    local totals = {}
+    for category in pairs(Hooks.LIFECYCLE_EVENTS) do
+        totals[category] = type(counters) == "table" and tonumber(counters[category]) or 0
+    end
+    return out, totals
 end
 
 function Hooks.isPlayer(object)
@@ -825,17 +1110,6 @@ function Hooks.allowedModules(kind, actor)
         end
     end
     return allowed
-end
-
-local function xyzOf(object)
-    local x, y, z = nil, nil, nil
-    pcall(function() x, y, z = object:getX(), object:getY(), object:getZ() end)
-    return x, y, z
-end
-
-local function flatDistance(ax, ay, bx, by)
-    local dx, dy = ax - bx, ay - by
-    return math.sqrt(dx * dx + dy * dy)
 end
 
 local function armed(player)
@@ -991,6 +1265,30 @@ local function zombiesWithin(x, y, radius)
         if sx ~= nil and flatDistance(x, y, sx, sy) <= radius then count = count + 1 end
     end
     return count
+end
+
+-- Plain zombies within radius tiles of this body (EventLog: a player's hit on an NPC that is
+-- fighting the dead was most likely meant for them).
+function Hooks.zombiesNear(object, radius)
+    local x, y = xyzOf(object)
+    return zombiesWithin(x, y, radius)
+end
+
+-- Bodies of living A-Life NPCs within tiles of this object, at most limit (EventLog: who saw
+-- the player kill a zombie right next to them).
+function Hooks.npcBodiesNear(object, tiles, limit)
+    local snapshot = resolve("Perception.zombieSnapshot")
+    local out = {}
+    local x, y = xyzOf(object)
+    if type(snapshot) ~= "table" or type(snapshot.actors) ~= "table" or x == nil then return out end
+    for _, sampled in ipairs(snapshot.actors) do
+        local sx, sy = tonumber(sampled.x), tonumber(sampled.y)
+        if sx ~= nil and sampled.body ~= object and flatDistance(x, y, sx, sy) <= tiles and Hooks.isNpc(sampled.body) then
+            out[#out + 1] = sampled.body
+            if #out >= (limit or 6) then break end
+        end
+    end
+    return out
 end
 
 local function healthRatio(actor, shell)

@@ -138,6 +138,9 @@ class FakeProvider:
     def chat(self, messages: list[Message], *, max_tokens: int, temperature: float, timeout: float) -> str:
         said = next((m["content"] for m in reversed(messages) if m["role"] == "user"), "")
         system = next((m["content"] for m in messages if m["role"] == "system"), "")
+        if system.startswith("You keep the memories of"):  # summary.build_summary_messages
+            memories = [line[2:] for line in said.splitlines() if line.startswith("- ")]
+            return "(test summary) " + " ".join(memories)[:300]
         heard = said.rsplit("The stranger says:", 1)[-1].strip().strip('"')
         intent, item, trade = "none", None, None
         lowered = heard.lower() + " "

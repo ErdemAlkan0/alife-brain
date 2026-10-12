@@ -109,7 +109,7 @@ def main(argv: list[str] | None = None) -> int:
         memory = MemoryStore(args.data_dir / "memory.sqlite3")
         sidecar = Sidecar(FileBridge(args.lua_dir), EventStore(args.data_dir / "events.jsonl"), memory=memory,
                           dataset=DatasetStore(args.data_dir / "dataset"), provider=provider,
-                          dialogue=settings.dialogue,
+                          dialogue=settings.dialogue, memory_settings=settings.memory,
                           health_interval_ms=settings.player2.health_interval_s * 1000)
         log.info("sidecar %s sid=%s provider=%s watching %s, data in %s", __version__, sidecar.sid,
                  settings.provider, args.lua_dir, args.data_dir)

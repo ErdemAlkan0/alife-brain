@@ -32,6 +32,7 @@ local Control = {
     NEAR_PLAYER = { careful = true },
     forced = nil, -- true / false from the debug console; nil follows the option
     option = nil, -- PZAPI.ModOptions tick box (client), read on every decision
+    saved = nil, -- the value in ModOptions.ini (Main.loadOptions), used when there is no tick box
     cache = nil,
     stats = nil,
 }
@@ -58,7 +59,8 @@ Control.reset()
 function Control.enabled()
     if Control.forced ~= nil then return Control.forced == true end
     local option = Control.option
-    if option == nil or type(option.getValue) ~= "function" then return false end
+    -- No tick box (Mod Options unavailable): what ModOptions.ini says (Main.loadOptions).
+    if option == nil or type(option.getValue) ~= "function" then return Control.saved == true end
     local ok, value = pcall(option.getValue, option)
     return ok and value == true
 end

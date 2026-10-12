@@ -9,7 +9,7 @@ from alifebrain_sidecar.app import Sidecar
 from alifebrain_sidecar.events import EventStore
 from alifebrain_sidecar.files import FileBridge
 from alifebrain_sidecar.llm import FakeProvider, LLMError
-from alifebrain_sidecar.memory import MemoryStore
+from alifebrain_sidecar.memory import MemoryStore, Npc
 from alifebrain_sidecar.protocol import REQ_FILE, RES_FILE
 
 
@@ -209,6 +209,55 @@ class HistoryAndActionTests(FlowTestCase):
         self.assertEqual(self.responses()[history_id]["error"], "uid_or_player_missing")
 
 
+class SummaryFlowTests(FlowTestCase):
+    provider = FakeProvider()
+
+    def remember(self, count, uid="u1"):
+        for index in range(count):
+            self.memory.add_memory("personal", uid, ts=self.now - 100_000 + index, kind="dialogue",
+                                   text=f"The stranger asked about water {index}.", importance=4)
+
+    def test_old_memories_are_summarized_while_idle_and_reach_the_prompt(self):
+        self.memory.upsert_npc(Npc(uid="u1", name="Hobbs Rifleman"), self.now)
+        self.remember(16)
+        self.sidecar.step()  # sends the summary job (this executor finishes it at once)
+        self.sidecar.step()  # stores it
+        self.assertEqual(self.sidecar.stats.get("summaries"), 1)
+        summaries = self.memory.summaries(self.memory.npc("u1"))
+        self.assertEqual(len(summaries), 1)
+        self.assertTrue(summaries[0].text.startswith("(test summary) The stranger asked about water 0."))
+        provider = ScriptedProvider('{"say": "Hm."}')
+        self.sidecar.provider = provider
+        self.send("dialogue", self.talk("Remember me?"))
+        self.sidecar.step()
+        system = provider.calls[0][0]["content"]
+        self.assertIn("From before:\n- Your past: (test summary)", system)
+        self.assertNotIn("water 0.", system.split("What you remember:")[-1], "summarized notes are not listed again")
+
+    def test_a_failed_summary_waits_and_nothing_runs_too_often(self):
+        provider = ScriptedProvider(LLMError("timeout"), "I remember the stranger asking about water.")
+        self.sidecar.provider = provider
+        self.remember(16)
+        self.sidecar.step()
+        self.sidecar.step()
+        self.assertEqual(self.sidecar.stats.get("summary_failed"), 1)
+        self.now += self.sidecar.memory_settings.summary_every_s * 1000
+        self.sidecar.step()
+        self.assertEqual(len(provider.calls), 1, "the failed layer waits for its retry time")
+        self.now += self.sidecar.memory_settings.summary_retry_s * 1000
+        self.sidecar.step()
+        self.sidecar.step()
+        self.assertEqual(len(provider.calls), 2)
+        self.assertEqual(self.sidecar.stats.get("summaries"), 1)
+
+    def test_can_be_switched_off(self):
+        self.sidecar.memory_settings.summarize = False
+        self.remember(20)
+        self.sidecar.step()
+        self.assertIsNone(self.sidecar.summary_job)
+        self.assertEqual(self.memory.summaries(Npc(uid="u1")), [])
+
+
 class ProviderFailureTests(FlowTestCase):
     def test_llm_errors_are_reported_with_their_code(self):
         self.sidecar.provider = ScriptedProvider(LLMError("rate_limited"))
@@ -218,6 +267,29 @@ class ProviderFailureTests(FlowTestCase):
         self.assertFalse(reply["ok"])
         self.assertEqual(reply["error"], "rate_limited")
         self.assertEqual(self.memory.recent_turns("u1", "sp:0"), [], "failed exchanges are not remembered")
+        self.assertEqual(len(self.sidecar.provider.calls), 1, "only a refusal is asked again")
+
+    def test_a_refused_prompt_is_asked_again_short(self):
+        # Play test (2026-10-11): Player2 refused the same prompt twice ("user input rejected", HTTP 400).
+        refused = LLMError("http_400", '{"message":"user input rejected (HTTP 400): API returned unexpected status code"}')
+        provider = ScriptedProvider(refused, '{"say": "Then build it. I will help."}')
+        self.sidecar.provider = provider
+        self.memory.add_memory("personal", "u1", ts=self.now - 10, kind="dialogue", text="The stranger burned the dead.",
+                               importance=6)
+        talk = self.talk("I plan to build a gate there.")
+        talk["npc"]["tradeable"] = [{"name": "MSR788 Rifle", "count": 1}]
+        request_id = self.send("dialogue", talk)
+        self.sidecar.step()
+        reply = self.responses()[request_id]
+        self.assertTrue(reply["ok"], reply)
+        self.assertEqual(reply["data"]["say"], "Then build it. I will help.")
+        full, short = provider.calls[0][0]["content"], provider.calls[1][0]["content"]
+        self.assertIn("The stranger burned the dead.", full)
+        self.assertIn("MSR788 Rifle", full)
+        self.assertTrue(short.startswith("(Role-play for the zombie survival video game Project Zomboid."))
+        self.assertNotIn("The stranger burned the dead.", short)
+        self.assertNotIn("MSR788 Rifle", short)
+        self.assertTrue(provider.calls[1][1]["content"].endswith('"I plan to build a gate there."'))
 
     def test_invalid_llm_output_is_refused(self):
         self.sidecar.provider = ScriptedProvider("I am an AI language model and cannot")

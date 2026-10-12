@@ -454,6 +454,43 @@ ALifeBrain.Tests.suite("Dialogue", {
         check.equal(Dialogue.executeTrade(env.player, env.npc, env.shell, ALifeBrain.Trade.new()).reason, "empty")
     end) end },
 
+    { "a reply that earns enough trust lets the player close, and says so", function(check)
+        run({ stance = "careful" }, function(env)
+            local Rapport = ALifeBrain.Rapport
+            local saved = { override = Rapport.override, granted = Rapport.granted, lastMs = Rapport.lastMs, stats = Rapport.stats }
+            local tolerated = {}
+            Rapport.reset()
+            Rapport.override = { player = env.player, minds = Dialogue.minds, log = function() end, hooks = {
+                peekRecord = function(uid) if uid == env.npc.uid then return env.npc end end,
+                groupKey = function(record) return "solo:" .. record.uid end,
+                stance = function() return env.stance end,
+                tolerate = function(_, _, untilMs) tolerated[#tolerated + 1] = untilMs; return true end,
+                toleratedUntil = function() return tolerated[#tolerated] end,
+                nameOf = function() return "Henry" end,
+            } }
+            local ok, failure = pcall(function()
+                local view, changes = env.view(), {}
+                function view:onRapport(change) changes[#changes + 1] = change end
+                Dialogue.ask(env.player, env.npc, env.shell, "A fair trade?", view)
+                check.isNil(env.requests[1].data.vouched)
+                env.answer(1, true, { say = "Deal.", trust = 6, fear = 0, intent = "none" })
+                check.same(changes, { "granted" })
+                check.equal(#tolerated, 1)
+                env.stance = "neutral" -- what A-Life reads now
+                Dialogue.ask(env.player, env.npc, env.shell, "Thanks.", view)
+                check.equal(env.requests[2].data.vouched, true, "the prompt is told")
+                env.answer(2, true, { say = "Get lost.", trust = 0, fear = 0, intent = "none" })
+                check.same(changes, { "granted", "withdrawn" })
+                env.stance = "careful"
+                env.talk("Hello again")
+                env.answer(3, true, { say = "Fine.", trust = 6, fear = 0, intent = "none" })
+                check.equal(#env.called("notify"), 1, "the talk box tells the player above their head")
+            end)
+            for key, value in pairs(saved) do Rapport[key] = value end
+            if not ok then error(failure, 0) end
+        end)
+    end },
+
     { "keeps long replies bounded", function(check) run(nil, function(env)
         env.talk()
         env.answer(1, true, { say = string.rep("a", 400) })

@@ -1,6 +1,7 @@
 -- Entry point: starts the sidecar bridge, keeps a ping going, runs the in-game tests
 -- in debug mode. Debug console helpers: ALifeBrain.status(), ALifeBrain.ping(),
--- ALifeBrain.runTests(), ALifeBrain.policy(), ALifeBrain.control(on).
+-- ALifeBrain.runTests(), ALifeBrain.policy(), ALifeBrain.control(on), ALifeBrain.npcs(),
+-- ALifeBrain.releaseKept().
 
 require "ALifeBrain/Json"
 require "ALifeBrain/Bridge"
@@ -10,6 +11,10 @@ require "ALifeBrain/Dialogue"
 require "ALifeBrain/DecisionLog"
 require "ALifeBrain/Moods"
 require "ALifeBrain/Control"
+require "ALifeBrain/Keeper"
+require "ALifeBrain/Rapport"
+require "ALifeBrain/Pause"
+require "ALifeBrain/Robberies"
 require "ALifeBrain/Companion"
 require "ALifeBrain/Standoff"
 require "ALifeBrain/Parley"
@@ -108,6 +113,9 @@ function Main.onTick()
     if Main.modulesAtMs ~= nil then
         local now = nowMs()
         ALifeBrain.Parley.tick(now)
+        ALifeBrain.Keeper.tick(now)
+        ALifeBrain.Rapport.tick(now)
+        ALifeBrain.Robberies.tick(now)
         if now - Main.stealthAtMs >= Main.settings.stealthMs then
             Main.stealthAtMs = now
             Hooks.updateFollowerStealth()
@@ -140,6 +148,16 @@ function Main.reportPolicy(now)
     Main.policyAsked = asked
     bridge:send("event", { kind = "policy_stats", decision = s.decision, response = s.response, modules = s.modules,
         reasons = s.reasons })
+end
+
+-- OnTick stops while the game is paused (the conversation window pauses it, Pause.lua): the
+-- bridge and the dialogue keep going here so a reply still reaches the window. The world's
+-- own work (A-Life decisions, parleys, keeping NPCs) waits with the game.
+function Main.onTickEvenPaused()
+    local bridge = ALifeBrain.bridge
+    if bridge == nil or not ALifeBrain.Pause.gamePaused() then return end
+    bridge:tick()
+    ALifeBrain.Dialogue.tick(nowMs())
 end
 
 function Main.reportHooks()
@@ -194,33 +212,77 @@ function Main.onGameStart()
         -- Phase 5: with policy control on, the policy picks among A-Life's modules (Control.lua).
         local Control = ALifeBrain.Control
         local chooser = Hooks.setDecisionChooser(Control.pick, Control.onChosen)
-        Main.loadOptions()
-        log("policy control: " .. (Control.enabled() and "on" or "off") .. " (Mod Options; tap "
+        local saved = Main.loadOptions()
+        log("policy control: " .. (Control.enabled() and "on" or "off") .. " (Mod Options: saved "
+            .. tostring(saved) .. ", menu " .. tostring(Control.option ~= nil) .. "; tap "
             .. (chooser and "ready" or "missing") .. ")")
+        local Keeper = ALifeBrain.Keeper
+        log("keep NPCs met within " .. Json.intToString(Keeper.settings.tiles) .. " tiles: "
+            .. (Keeper.enabled() and "on" or "off") .. "; pause while talking: "
+            .. (ALifeBrain.Pause.enabled() and "on" or "off"))
     end
 end
 
--- Mod Options (B42 PZAPI.ModOptions): one tick box for policy control. The game keeps its
--- value in its own ModOptions.ini; created when this file loads, so the options screen has it.
+-- Mod Options (B42 PZAPI.ModOptions): tick boxes for policy control and keeping met NPCs.
+-- The game keeps their values in its own ModOptions.ini; created when this file loads, so the
+-- options screen has them.
+Main.OPTIONS = {
+    { id = "policyControl", owner = "Control", default = false, label = "option_control", tip = "option_control_tip" },
+    { id = "keepMetNpcs", owner = "Keeper", default = true, label = "option_keep", tip = "option_keep_tip" },
+    { id = "pauseWhileTalking", owner = "Pause", default = true, label = "option_pause", tip = "option_pause_tip" },
+}
+
 function Main.createOptions()
     local api = type(PZAPI) == "table" and PZAPI.ModOptions or nil
     if type(api) ~= "table" or type(api.create) ~= "function" then return false, "no_mod_options" end
     local T = ALifeBrain.Text
     local ok, options = pcall(api.create, api, "ALifeBrain", "A-Life Brain")
     if not ok or type(options) ~= "table" then return false, tostring(options) end
-    local made, option = pcall(options.addTickBox, options, "policyControl", T.get("option_control"), false,
-        T.get("option_control_tip"))
-    if not made then return false, tostring(option) end
+    for _, spec in ipairs(Main.OPTIONS) do
+        local made, option = pcall(options.addTickBox, options, spec.id, T.get(spec.label), spec.default, T.get(spec.tip))
+        if not made then return false, tostring(option) end
+        ALifeBrain[spec.owner].option = option
+    end
     Main.options = options
-    ALifeBrain.Control.option = option
     return true
 end
 
+-- One of our values as ModOptions.ini has it ("tickbox|ALifeBrain|<id>|true"), or nil. The
+-- game writes CRLF lines; a "\r" left on "true" makes its own loader skip the value.
+function Main.savedOption(id)
+    local value = nil
+    pcall(function()
+        local reader = getFileReader("ModOptions.ini", false)
+        if reader == nil then return end
+        while true do
+            local line = reader:readLine()
+            if line == nil then break end
+            local mod, key, raw = string.match(line, "^[^|]*|([^|]*)|([^|]*)|(%a*)")
+            if mod == "ALifeBrain" and key == id then
+                if raw == "true" then value = true elseif raw == "false" then value = false end
+            end
+        end
+        reader:close()
+    end)
+    return value
+end
+
 -- The options screen reads ModOptions.ini only when it is built; read the saved values now.
+-- Play test (2026-10-11): ticked in Mod Options, still "off" in game, so our own line is read
+-- as well and wins when the game's loader left the default.
 function Main.loadOptions()
     local api = type(PZAPI) == "table" and PZAPI.ModOptions or nil
-    if Main.options == nil or type(api) ~= "table" or type(api.load) ~= "function" then return false end
-    return pcall(api.load, api)
+    if Main.options ~= nil and type(api) == "table" and type(api.load) == "function" then pcall(api.load, api) end
+    local values = {}
+    for _, spec in ipairs(Main.OPTIONS) do
+        local owner = ALifeBrain[spec.owner]
+        local saved = Main.savedOption(spec.id)
+        owner.saved, values[spec.id] = saved, saved
+        if saved ~= nil and owner.option ~= nil and type(owner.option.setValue) == "function" then
+            pcall(owner.option.setValue, owner.option, saved)
+        end
+    end
+    return values.policyControl, values
 end
 
 function ALifeBrain.status()
@@ -249,6 +311,9 @@ function ALifeBrain.status()
     status.control = { on = control.enabled(), decision = control.stats.decision, response = control.stats.response,
         reasons = control.stats.reasons, chooserError = Hooks.decisionChooserError }
     status.moods = ALifeBrain.Moods.stats
+    local keeper = ALifeBrain.Keeper
+    status.keeper = { on = keeper.enabled(), stats = keeper.stats, savedGroups = keeper.groups, cap = keeper.cap }
+    status.rapport = ALifeBrain.Rapport.stats
     log(tostring(Json.encode(status)))
     return status
 end
@@ -299,13 +364,80 @@ end
 function ALifeBrain.ping() return Main.ping() end
 
 -- Debug console: ALifeBrain.spawnTestNpc() spawns one friendly NPC (Church Volunteers) to talk to;
--- ALifeBrain.spawnTestNpc("alife_hobbs", 3) spawns three Hobbs Brothers (hostile).
-function ALifeBrain.spawnTestNpc(factionId, count, encounterId)
+-- ALifeBrain.spawnTestNpc("alife_hobbs", 3) spawns three Hobbs Brothers (hostile). They are kept
+-- across saves; pass temporary = true for A-Life's expendable debug NPCs (deleted once nobody
+-- visits them for its "Unvisited NPC lifetime").
+function ALifeBrain.spawnTestNpc(factionId, count, encounterId, temporary)
     local faction = factionId or "alife_church_volunteers"
-    local ok, reason = Hooks.spawnTestNpc(getPlayer(), encounterId or "patrol", count or 1, 6, faction)
-    log(ok and ("spawn requested (" .. faction .. "); A-Life answers in its own log")
-        or ("spawn failed: " .. tostring(reason)))
+    local ok, reason = Hooks.spawnTestNpc(getPlayer(), encounterId or "patrol", count or 1, 6, faction, temporary ~= true)
+    log(ok and ("spawn requested (" .. faction .. (temporary == true and ", temporary" or ", kept") .. ")"
+        .. "; A-Life answers in its own log") or ("spawn failed: " .. tostring(reason)))
     return ok
+end
+
+-- Debug console: A-Life's NPCs (nearest first: lifecycle, kept or expendable, distance) and
+-- what its lifecycle telemetry recorded since this load (deletions and their reasons).
+-- "dormant" NPCs are stored, not deleted: A-Life brings them back within 60 tiles.
+function ALifeBrain.npcs(limit)
+    local rows, counts = Hooks.actorSnapshot(getPlayer())
+    local summary = {}
+    for lifecycle, count in pairs(counts) do summary[#summary + 1] = lifecycle .. " " .. Json.intToString(count) end
+    table.sort(summary)
+    log("A-Life NPCs: " .. (#summary > 0 and table.concat(summary, ", ") or "none"))
+    for index = 1, math.min(#rows, tonumber(limit) or 20) do
+        local row = rows[index]
+        log("  " .. tostring(row.name or row.uid) .. " [" .. tostring(row.faction) .. "] " .. row.lifecycle
+            .. (row.kept and ", kept" or ", expendable") .. (row.debug and " (debug spawn)" or "")
+            .. (row.distance ~= nil and (", " .. Json.intToString(math.floor(row.distance + 0.5)) .. " tiles") or ""))
+    end
+    local groups, cap, ours = Hooks.savedGroups()
+    local keeper = ALifeBrain.Keeper
+    log("saved groups: " .. Json.intToString(groups) .. " (we kept " .. Json.intToString(ours) .. "), A-Life saves "
+        .. tostring(cap) .. "; keeping met NPCs " .. (keeper.enabled() and "on" or "off") .. ", this session "
+        .. Json.intToString(keeper.stats.kept) .. " groups / " .. Json.intToString(keeper.stats.npcs) .. " NPCs")
+    local events, totals = Hooks.lifecycleEvents()
+    local parts = {}
+    for category, count in pairs(totals) do
+        if count > 0 then parts[#parts + 1] = category .. " " .. Json.intToString(count) end
+    end
+    log("since this load: " .. (#parts > 0 and table.concat(parts, ", ") or "no deletions or failed spawns"))
+    for index = math.max(1, #events - 9), #events do
+        local event = events[index]
+        log("  " .. tostring(event.category) .. " uid=" .. tostring(event.uid) .. " reason="
+            .. tostring(event.reason or event.stage or event.error))
+    end
+    return rows
+end
+
+-- Debug console: trust and A-Life's stance toward the player of every NPC we know a mood of
+-- (most trusting first); "trusted" = a careful group that lets the player close (Rapport.lua).
+function ALifeBrain.trust(limit)
+    local player, now, rows = getPlayer(), nowMs(), {}
+    for uid, mind in pairs(ALifeBrain.Dialogue.minds) do
+        local record = Hooks.peekRecord(uid)
+        if record ~= nil and record.lifecycle ~= "dead" then
+            rows[#rows + 1] = { name = Hooks.nameOf(record) or uid, trust = tonumber(mind.trust) or 0,
+                fear = tonumber(mind.fear) or 0, stance = ALifeBrain.Chat.stanceOf(record, player) }
+        end
+    end
+    table.sort(rows, function(a, b) return a.trust > b.trust end)
+    local settings = ALifeBrain.Rapport.settings
+    log("trust lets a careful group's guard down at " .. Json.intToString(settings.trust) .. " (back below "
+        .. Json.intToString(settings.keepTrust) .. "); " .. Json.intToString(#rows) .. " NPCs known")
+    for index = 1, math.min(#rows, tonumber(limit) or 20) do
+        local row = rows[index]
+        log("  " .. tostring(row.name) .. ": trust " .. Json.intToString(row.trust) .. ", fear "
+            .. Json.intToString(row.fear) .. ", " .. row.stance)
+    end
+    return rows
+end
+
+-- Debug console: undoes keeping for every NPC we kept (turn "Keep NPCs you meet" off in Mod
+-- Options first, or the next meeting keeps them again).
+function ALifeBrain.releaseKept()
+    local released = ALifeBrain.Keeper.releaseAll()
+    log("released " .. Json.intToString(released) .. " kept NPCs (A-Life treats them as before)")
+    return released
 end
 
 function ALifeBrain.runTests()
@@ -317,6 +449,7 @@ Main.createOptions()
 if type(Events) == "table" then
     if Events.OnGameStart ~= nil then Events.OnGameStart.Add(Main.onGameStart) end
     if Events.OnTick ~= nil then Events.OnTick.Add(Main.onTick) end
+    if Events.OnTickEvenPaused ~= nil then Events.OnTickEvenPaused.Add(Main.onTickEvenPaused) end
 end
 
 return Main

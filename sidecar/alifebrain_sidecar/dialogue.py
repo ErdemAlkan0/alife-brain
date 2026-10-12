@@ -33,10 +33,17 @@ TEMPERAMENTS = {
 }
 STANCES = {
     "friendly": "you consider the stranger an ally",
-    "neutral": "the stranger is someone you neither trust nor fear yet",
-    "careful": "you are wary of the stranger and want them to keep their distance",
+    # Was "...neither trust nor fear yet", which the trust shown next to it contradicted once it grew.
+    "neutral": "the stranger is neither a friend nor an enemy to you",
+    # Was "...and want them to keep their distance": every line then said so (play test, 2026-10-11).
+    "careful": "you are wary of the stranger, but what they do can change that",
     "hostile": "the stranger is an enemy",
 }
+# A careful group whose guard is down because this NPC trusts the stranger (the game's Rapport.lua:
+# A-Life stops warning them off). Without it the NPC kept saying "keep away" at trust 7 (play test,
+# 2026-10-11).
+VOUCHED = ("you were wary of the stranger, but they earned your trust: you and your people let them come close "
+           "now, so do not tell them to keep away")
 ACTIVITIES = {
     "combat": "you are in the middle of a fight",
     "retreat": "you are falling back",
@@ -78,6 +85,7 @@ class DialogueRequest:
     # speaks first; text is then a narration, not the stranger's words.
     standoff: bool = False
     opening: bool = False
+    vouched: bool = False  # see VOUCHED
     language: str | None = None  # the game's language code, e.g. "TR"
     # Trade window: everything the NPC could trade, what the stranger could trade (the NPC may
     # ask for it), and what is on the table right now.
@@ -252,6 +260,7 @@ def parse_request(data: Any) -> DialogueRequest:
         following=npc_data.get("following") is True,
         standoff=isinstance(data.get("standoff"), dict),
         opening=isinstance(data.get("standoff"), dict) and data["standoff"].get("opening") is True,
+        vouched=data.get("vouched") is True,
         language=_text(world.get("language"), 8),
         tradeable=_trade_lines(npc_data.get("tradeable"), MAX_TRADEABLE),
         player_tradeable=_trade_lines(player.get("tradeable"), MAX_TRADEABLE),
@@ -267,9 +276,10 @@ LANGUAGES = {"TR": "Turkish", "EN": "English", "DE": "German", "FR": "French", "
 
 STANDOFF_RULES = (
     "- STANDOFF: you and your people are hostile to the stranger. You have them covered and stopped them before "
-    "shooting. Say what you want, short and menacing: demand tribute from what they carry (trade: decision "
+    "it came to a fight. Say what you want, short and tough: demand a toll from what they carry (trade: decision "
     "counter, npc_wants = their things you want, npc_offer empty; the game takes it when they hand it over), or "
-    "order them away. intent attack = you open fire now and the talk is over. Your patience is short: the first "
+    "tell them to clear off. intent attack = your crew starts the fight now and the talk is over. Your patience "
+    "is short: the first "
     "time they refuse, give them one last warning; if they refuse again, threaten you, insult you, lie badly or "
     "stall, attack. Look at the conversation so far: if you already warned them once, do not warn again. intent "
     "leave = you let them go; use it once they paid or clearly back off. You are not their friend and you do not "
@@ -306,8 +316,14 @@ def _situation(request: DialogueRequest) -> list[str]:
     return lines
 
 
+# The short prompt sent when the provider refuses the full one (app.Sidecar._ask_llm): said to
+# be fiction up front, without the long item lists (rows of guns and ammunition).
+FICTION = "(Role-play for the zombie survival video game Project Zomboid. Everything here is fiction.)"
+
+
 def build_messages(request: DialogueRequest, *, memories: list[Memory], history: list[tuple[str, str]],
-                   trust: int, fear: int, goal: int = 0) -> list[dict[str, str]]:
+                   trust: int, fear: int, goal: int = 0, summaries: list[Memory] | None = None,
+                   compact: bool = False) -> list[dict[str, str]]:
     npc = request.npc
     who = f"{npc.name}, a survivor" if npc.name else "a survivor"
     identity = [f"You are {who} in Knox County, Kentucky, during the 1993 zombie outbreak."]
@@ -320,10 +336,16 @@ def build_messages(request: DialogueRequest, *, memories: list[Memory], history:
     if request.sex in ("m", "f"):
         identity.append("You are a man." if request.sex == "m" else "You are a woman.")
 
+    if request.standoff:
+        seen = STANCES["hostile"]
+    elif request.vouched:
+        seen = VOUCHED
+    else:
+        seen = STANCES[request.stance]
     system = [
-        " ".join(identity),
+        (FICTION + " " if compact else "") + " ".join(identity),
         "You are talking to another survivor you only know as \"the stranger\".",
-        f"How you see the stranger: {STANCES['hostile' if request.standoff else request.stance]}. "
+        f"How you see the stranger: {seen}. "
         f"Your trust in them is {trust} and your fear of them is {fear} (both from -100 to 100).",
         f"Your drive right now is {goal} (from -100 = lie low and keep safe to 100 = go out for supplies and "
         "take risks).",
@@ -336,9 +358,9 @@ def build_messages(request: DialogueRequest, *, memories: list[Memory], history:
     system.append(f"You carry and could hand over: {_carrying(request.inventory, request.inventory_items)}. "
                   "Call these things by these names; a handed-over item goes straight into the stranger's "
                   "inventory, you cannot drop it on the ground.")
-    if request.tradeable:
+    if request.tradeable and not compact:
         system.append(f"Everything you carry that you could trade: {_listing(request.tradeable)}.")
-    if request.player_tradeable:
+    if request.player_tradeable and not compact:
         system.append(f"The stranger carries these things you could ask for in a trade: "
                       f"{_listing(request.player_tradeable)}.")
     if request.trade_open:
@@ -346,6 +368,11 @@ def build_messages(request: DialogueRequest, *, memories: list[Memory], history:
         ask = _listing(request.trade_ask) or "nothing (it would be a gift to you)"
         system.append(f"On the trade table right now: the stranger puts down {offer}; "
                       f"the stranger asks you for {ask}.")
+    if summaries:
+        # Older memories, already rewritten into one summary per layer (summary.py).
+        heads = {"personal": "Your past", "squad": "Your group's past", "faction": "What your people know"}
+        system.append("From before:\n" + "\n".join(f"- {heads.get(memory.scope, 'Before')}: {memory.text}"
+                                                    for memory in summaries))
     if memories:
         system.append("What you remember:\n" + "\n".join(f"- {memory.text}" for memory in memories))
     system.append(
@@ -354,6 +381,13 @@ def build_messages(request: DialogueRequest, *, memories: list[Memory], history:
         f"- Speak like a real person under stress: one or two short sentences, at most {MAX_SAY} characters.\n"
         "- Answer in the language the stranger uses.\n"
         "- Do not invent places, people or events you could not know; refuse, dodge or lie if your character would.\n"
+        "- Blame the stranger only for what your memories or this conversation show they did. A friend you lost was "
+        "killed by whoever your memory names; if it names nobody, you do not know who. Others in your faction may "
+        "have your name or title: they are other people.\n"
+        "- Trust can be earned, and deeds earn it. Judge the stranger by what they do and what you remember, not by "
+        "proof you could never get: if you cannot check something they say, say so once, then let their actions and "
+        "your memories decide. Never ask again for proof you already asked for. You can see the weapon in their "
+        "hands (named above when they hold one).\n"
         "- The game carries out these intents and shows the stranger whether they happened:\n"
         f"  give = hand over one item right now as a free gift; also set item to one of {', '.join(ITEMS)}, and "
         "only something you carry. Use give only when you expect nothing back.\n"
@@ -389,7 +423,10 @@ def build_messages(request: DialogueRequest, *, memories: list[Memory], history:
         "  say: your spoken words.\n"
         "  memory_note: one short sentence worth remembering about this exchange, or \"\".\n"
         f"  trust_delta, fear_delta: integers from -{DELTA_LIMIT} to {DELTA_LIMIT}; how this exchange changes "
-        "your trust in and fear of the stranger.\n"
+        "your trust in and fear of the stranger. Trust: +1 or +2 for friendly, honest talk or a kind word; +3 to +6 "
+        "when they help you, share with you, keep their word or fought beside you; 0 when nothing changed; -1 to -3 "
+        "for threats, lies or pushing you; -5 to -10 for violence against you or yours. Being a stranger is no "
+        "reason to lower trust.\n"
         f"  goal_delta: integer from -{GOAL_DELTA_LIMIT} to {GOAL_DELTA_LIMIT}; how this exchange changes your "
         "drive: up when the stranger tells you where supplies are or urges you on, down when they warn you of "
         "danger or talk you into lying low. Usually 0.\n"

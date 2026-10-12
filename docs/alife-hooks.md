@@ -241,12 +241,21 @@ LLM `trust_delta` / `fear_delta` → A-Life'ta zaten var olan kollar (sınırlı
 
 | Kol | Etki | Nasıl |
 |---|---|---|
-| `memory.tolerateUntil[playerKey] = untilMs` | `careful` → `neutral` | `Talk.tolerate(record, playerKey, untilMs)` (squad'a yayar) |
+| `memory.tolerateUntil[playerKey] = untilMs` | `careful` → `neutral` | `Talk.tolerate(record, playerKey, untilMs)` (squad'a yayar). **Uygulandı:** `Rapport.lua` (güven ≥ 5) |
 | `memory.carefulPlayerKeys[playerKey] = untilMs` | `neutral/friendly` → `careful` | `Talk.writeMemory` |
 | `memory.hostileToPlayerKeys[playerKey] = true` | → `hostile` | `Talk.writeMemory` (geri dönüşü zor; LLM'e açma) |
 | `Reputation.escalate(...)` | fraksiyon çapında düşmanlık | LLM'e **açma** |
 
 `playerKey`: SP'de `"sp:0"`, MP'de kullanıcı adı (`Reputation.playerKey(player)`).
+
+**Güven → tutum (uygulandı, 2026-10-12):** temkinli tutum yalnızca fraksiyondan gelir; `ModuleCareful`
+(`Behaviours/ALifeModuleCareful.lua`, öncelik 5) 14 karede `CAREFUL_KEEP_BACK`, 9 karede ve oyuncu 0,75 kare daha
+ilerleyince `CAREFUL_LAST_WARNING`, sonra 6 karenin içinde 1,5 s kalınca `turnGroup` (`hostileToPlayerKeys`, ateş)
+yapar; merdiven grup + oyuncu başına, 45 s içeri girilmezse unutulur. Oyun testinde güveni 5–6 olan iki NPC sohbet
+penceresi kapanınca (oyuncu 6 karenin içinde) gruba döndü. `Rapport.lua`: bildiğimiz en güvenen üyesi ≥ 5 olan
+temkinli grup için `Hooks.tolerate` (= `Talk.tolerate`, 10 dk, 5 dk kalınca yenilenir); güven < 3 olunca yalnızca
+bizim yazdığımız değer (`toleratedUntil` eşitse) `now` ile bitirilir. Hemen etki için cevap gelir gelmez de çalışır
+(`Rapport.onReply`, `Dialogue.finish`). `Hooks.groupKey` = Careful'ın `groupOf` (karakol / grup / tek).
 
 ## 8. Olay kaynakları (loglama / hafıza / RL veri seti)
 
@@ -291,8 +300,24 @@ A-Life'ta genel bir olay yolu yok; `Telemetry.emit` çok az kategoriye sahip (`a
 - `factionId` verilirse o fraksiyondan seçer (`Service.hostileProfileIds(count, seed, factionId, true)`).
   Oyuncuya bakış `common/alife_runtime/catalog/faction_registry.alife` içindeki `stance.player`: ör. dost/barışçıl
   `alife_church_volunteers`, `alife_county_ems`, `alife_lone_nurse`; düşman `alife_hobbs`, `alife_pit`.
-- Bizim kısayol: `ALifeBrain.spawnTestNpc(factionId, count, encounterId)` → `Hooks.spawnTestNpc`
-  (varsayılan `alife_church_volunteers`, 1 NPC, `patrol`).
+- Bizim kısayol: `ALifeBrain.spawnTestNpc(factionId, count, encounterId, temporary)` → `Hooks.spawnTestNpc`
+  (varsayılan `alife_church_volunteers`, 1 NPC, `patrol`, kalıcı: komuta `persistent = true` gider).
+- **Kalıcılık (2026-10-11 doğrulandı):** `debugSpawnCatalog` `args.persistent` almazsa encounter tanımının
+  `persistent`'ini kullanır (`patrol` için yok) → kayıtta `memory.persistent`/`encounter` boş, `memory.debugSpawn`
+  dolu. `Population.expendable` bunları harcanabilir sayar: oyuncu 60 kareden (`spawnDistance`) uzaktayken uyuyan
+  (`dormant`) NPC, sandbox `Population_DormantTtlHours` ("Unvisited NPC lifetime", varsayılan 8 oyun saati) dolunca
+  `Registry.remove(..., "dormant_ttl")` ile silinir. `persistent = true` → `encounterPersistent` + `anchor`, silinmez.
+  **Kayıt:** `Persistence.forSave` kayda yalnızca izinli grupların kayıtlarını yazar: `SquadLedger.liveIds()` (offline
+  squad'lar), yerleşik karakol sakinleri ve `actorGroup` dönen diğer gruplar (`outpostId`, `squadId`, `persistent` ya da
+  `admin.persistent`; anahtar `groupId or encounter or uid`) `Persistence.squadCap`'e (sandbox
+  `Population_PersistentSquadCap`, "Saved group limit", varsayılan 20, en çok 500, canlı değişir) kadar. `sessionOnly` /
+  `outpostSquadId` hiç yazılmaz. Kalıcı olmayan NPC tek oturumluktur (`sessionActors`). **Uygulandı:** `Keeper.lua` +
+  `Hooks.keepGroupOf` (grubun bütün yaşayan üyelerine `Talk.writeMemory` ile `persistent = true`,
+  `alifeBrainKeptAtMs`), `Hooks.savedGroups`, `Hooks.releaseKept`. `Persistence.actorGroupCount` hiçbir yerde
+  kullanılmıyor; nüfus kapasitesi (`Population.capacityUsed`) yalnızca oyuncunun 60 karesindeki uyuyanları sayar.
+  A-Life her silmeyi `Telemetry.emit("actor_removed", {uid, reason})` ile yalnızca bellekteki halkaya (96 olay) ve
+  `Telemetry.counters`'a yazar, konsola basmaz: `ALifeBrain.npcs()` bunları gösterir (`Hooks.actorSnapshot`,
+  `Hooks.lifecycleEvents`).
 - Gözlem (A-Life'a bildirilebilir): `hostileProfileIds` içindeki `seed % 2147483647` milisaniye zaman damgasıyla
   çağrılıyor; Kahlua'nın `%` hatası yüzünden (bkz. CLAUDE.md) sonuç beklenenden farklı olabilir. Zararı muhtemelen
   yalnızca profil seçiminin rastgeleliği.

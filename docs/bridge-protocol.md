@@ -56,7 +56,9 @@ Bütün satırlar **ASCII** JSON'dur (ASCII dışı karakterler `\uXXXX`), bu y�
 ```
 
 İstekte ayrıca `npc.inventory` (`{"water": 1, "food": 0, "medicine": 2}`, A-Life'ın verilebilir eşya kurallarıyla
-sayılır) ve `npc.following` (NPC şu an bu oyuncuyu takip ediyor mu) gelir.
+sayılır) ve `npc.following` (NPC şu an bu oyuncuyu takip ediyor mu) gelir. `vouched: true`: NPC'nin grubu aslında
+temkinli ama bu NPC oyuncuya güvendiği için yaklaşmasına izin veriyor (`Rapport.lua`; `stance` o zaman `neutral`
+gelir); prompt "geri dur" dememesini söyler.
 
 Cevap `data`: `{"say": "...", "intent": "none|give|follow|stay|leave|trade|warn|attack|rob|give_info",
 "item": "water|food|medicine|null", "trustDelta": 0, "fearDelta": 0, "trust": 0, "fear": 0, "goalDelta": 0,
@@ -136,9 +138,24 @@ bırakıldı; `modules`: çalıştırılan modüller; `reasons`: neden bırakıl
 "give|follow|stay|leave|trade", "ok": true, "item": "water", "label": "Water Bottle", "given": ["..."] (NPC'den
 oyuncuya), "received": ["..."] (oyuncudan NPC'ye), "reason": "no_item|too_far|limit|low_trust|refused|rejected|
 changed|empty|unpaid", "npc": {...}, "by": {"kind": "player", "key": "sp:0"}}`. `trust`/`fear` NPC'nin o oyuncuya karşı birikmiş değeridir (-100..100).
+`npc_hit` oyuncudan geldiyse `zombiesNear` (kurbanın 4 karesindeki sıradan zombi sayısı) taşır: > 0 ise sidecar bunu
+kaza sayar (güven −3, korku +2, "by accident" anısı; squad'a saldırı diye yazılmaz). `player_helped` (EventLog
+`onZombieKilled`): oyuncunun öldürdüğü sıradan bir zombinin 10 karesindeki her A-Life NPC'si için, NPC başına dakikada
+en çok bir kez, aradaki öldürmeler `kills` ile toplanır: güven +3 (3+ öldürmede +4), korku −1, 5 dakikada bir kişisel
+("The stranger killed ... right next to me.") ve squad anısı. Tamamlanan takasta oyuncu bir şey verdiyse güven ayrıca
+artar (hediye +6, karşılıklı +2). `reason` ayrıca `combat` olabilir (NPC çatışmanın ortasında).
+`robbed_player` (Robberies.lua): bir A-Life ekibinin oyuncuyu soyması bitti. `{"npc": <lider>, "crew": [<en çok 6
+üye>], "outcome": "released" | "execute:<fled|drew_weapon|armed|no_hands|shouted|aimed_at_crew|attacked_crew|
+hostile_surrender>" | "player_gone" | "crew_gone" | "interrupted", "taken": ["Hammer", ...], "by": {"kind": "player",
+"key"}}`. NPC'ler burada A-Life kaydından tanımlanır (`Hooks.describeRecord`: uid, name, factionId, groupId).
+`by`: `{"kind": "player", "key"}`, `{"kind": "npc", "uid"}` (`npc_died`'da ayrıca `name`, `factionId`, `groupId`:
+sidecar kaybı katilin adıyla hatırlar), `{"kind": "zombie"}` ya da `{"kind": "other"}`.
 Hata kodları: `dialogue_unavailable`, `invalid_llm_reply`, sağlayıcı kodları (`timeout`, `rate_limited`,
 `unreachable`, `unauthorized`, `player2_client_id_missing` ...). LLM çağrısı sidecar'da arka planda çalışır;
-Lua 35 s bekler (Player2 ücretsiz modeli ölçümde 10–17 s sürdü; sidecar 30 s sonra vazgeçer), sonra A-Life'ın hazır repliğine düşer.
+Sidecar 60 s sonra vazgeçer (`dialogue.timeout_s`; Player2 130 cevapta ortanca 11 s, %95'i 20 s içinde, en yavaşı
+32 s, yavaş bir akşam bir sohbetin ilk cevabı 37 ve 43 s; eski 30 s sınırı cevapların %3'ünü kesiyordu, sohbet
+sırasında oyun duraklatıldığı için beklemek ucuz; dosyada eski varsayılan 30 kaldıysa 60 kullanılır). Lua 75 s bekler
+(sidecar her zaman önce cevap verir; yalnızca sidecar yoksa işe yarar), sonra A-Life'ın hazır repliğine düşer.
 
 ## Sidecar → Lua (cevap dosyası)
 

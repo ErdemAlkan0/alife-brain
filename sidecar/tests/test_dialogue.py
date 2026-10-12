@@ -87,6 +87,18 @@ class BuildMessagesTests(unittest.TestCase):
                                  trust=0, fear=0)
         self.assertIn("(What actually happened) Henry handed over Water Bottle.", user["content"])
 
+    def test_a_careful_npc_that_trusts_the_stranger_lets_them_close(self):
+        request = parse_request(request_data(stance="neutral", vouched=True))
+        self.assertTrue(request.vouched)
+        system, _ = build_messages(request, memories=[], history=[], trust=7, fear=0)
+        self.assertIn("they earned your trust", system["content"])
+        self.assertIn("do not tell them to keep away", system["content"])
+        self.assertNotIn("neither a friend nor an enemy", system["content"])
+        self.assertFalse(parse_request(request_data(vouched="yes")).vouched)
+        standoff = parse_request(request_data(stance="hostile", vouched=True, standoff={}))
+        system, _ = build_messages(standoff, memories=[], history=[], trust=7, fear=0)
+        self.assertIn("the stranger is an enemy", system["content"], "a standoff stays a standoff")
+
     def test_minimal_request_still_builds(self):
         request = parse_request({"text": "hi", "player": {"key": "sp:0"}, "npc": {"uid": "u"}})
         system, user = build_messages(request, memories=[], history=[], trust=0, fear=0)
@@ -113,6 +125,9 @@ class ParseReplyTests(unittest.TestCase):
         system, _ = build_messages(request, memories=[], history=[], trust=0, fear=0, goal=-40)
         self.assertIn("Your drive right now is -40", system["content"])
         self.assertIn("goal_delta", system["content"])
+        self.assertIn("Blame the stranger only for what your memories or this conversation show", system["content"])
+        self.assertIn("Never ask again for proof you already asked for", system["content"])
+        self.assertIn("+3 to +6 when they help you", system["content"])
 
     def test_extracts_json_from_chatty_or_fenced_output(self):
         for text in ['Sure! {"say": "Hi."} Hope that helps',

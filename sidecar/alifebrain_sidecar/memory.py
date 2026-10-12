@@ -10,6 +10,9 @@ from pathlib import Path
 
 SCOPES = ("personal", "squad", "faction")
 MOOD_LIMIT = 100
+SUMMARY_KIND = "summary"
+SUMMARY_LIMIT = 400
+SUMMARY_IMPORTANCE = 6
 # The NPC's drive (the policy's goal input, -100 lie low .. 100 go out for supplies and risks):
 # one per NPC, stirred by conversations and settling back to 0 (the game uses the same half-life).
 GOAL_LIMIT = 100
@@ -83,12 +86,28 @@ class Memory:
     importance: int
 
 
+@dataclass(frozen=True)
+class SummaryCandidate:
+    """Old memories of one layer to rewrite into a summary (MemoryStore.summary_candidate)."""
+
+    scope: str
+    key: str
+    ids: tuple[int, ...]
+    texts: tuple[str, ...]
+    last_ts: int
+    previous_id: int | None = None
+    previous_text: str | None = None
+
+
 class MemoryStore:
     def __init__(self, path: Path | str) -> None:
         if str(path) != ":memory:":
             Path(path).parent.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(str(path))
         self.db.executescript(_SCHEMA)
+        columns = {row[1] for row in self.db.execute("PRAGMA table_info(memories)")}
+        if "summarized" not in columns:  # databases from before memory summaries
+            self.db.execute("ALTER TABLE memories ADD COLUMN summarized INTEGER NOT NULL DEFAULT 0")
         self.db.commit()
 
     def close(self) -> None:
@@ -183,24 +202,34 @@ class MemoryStore:
         self.db.commit()
         return True
 
+    def _layers(self, npc: Npc, world: str | None) -> list[tuple[str, str | None]]:
+        return [("personal", npc.uid), ("squad", npc.group_id), ("faction", faction_key(npc.faction_id, world))]
+
     def recall(self, npc: Npc, *, query: str = "", now: int, limit: int = 6, world: str | None = None) -> list[Memory]:
-        """Most useful memories across the three layers (the faction's of this save: world).
+        """Most useful memories across the three layers (the faction's of this save: world),
+        leaving out summaries (MemoryStore.summaries) and what they already cover.
 
         Score = importance + recency (+4 when fresh, halved after one real-time day)
         + 2 per word shared with the query; personal memories rank above squad, squad above
         faction.
         """
-        keys = [("personal", npc.uid), ("squad", npc.group_id), ("faction", faction_key(npc.faction_id, world))]
         layer_bonus = {"personal": 2, "squad": 1, "faction": 0}
         query_words = _words(query)
         scored: list[tuple[float, Memory]] = []
-        for scope, key in keys:
+        squad_events: set[tuple[str, int]] = set()
+        for scope, key in self._layers(npc, world):
             if not key:
                 continue
             rows = self.db.execute(
-                "SELECT ts, kind, text, importance FROM memories WHERE scope = ? AND scope_key = ? "
+                "SELECT ts, kind, text, importance, summarized FROM memories WHERE scope = ? AND scope_key = ? "
                 "ORDER BY ts DESC LIMIT 200", (scope, key)).fetchall()
-            for ts, kind, text, importance in rows:
+            for ts, kind, text, importance, summarized in rows:
+                if scope == "squad":
+                    squad_events.add((kind, ts))
+                elif scope == "faction" and (kind, ts) in squad_events:
+                    continue  # the same death the squad remembers itself (its own squad mate)
+                if summarized or kind == SUMMARY_KIND:
+                    continue
                 age_hours = max(0.0, (now - ts) / 3_600_000)
                 recency = 4.0 / (1.0 + age_hours / 24.0)
                 overlap = len(query_words & _words(text))
@@ -210,6 +239,69 @@ class MemoryStore:
         chosen = [memory for _, memory in scored[:limit]]
         chosen.sort(key=lambda memory: memory.ts)
         return chosen
+
+    # -- summaries ----------------------------------------------------------------
+    # Old memories are rewritten into one short summary per layer (summary.py; the sidecar
+    # does it while idle). The originals stay in the table, marked summarized, out of recall.
+
+    def summaries(self, npc: Npc, world: str | None = None) -> list[Memory]:
+        """The current summary of each of the NPC's layers that has one."""
+        out = []
+        for scope, key in self._layers(npc, world):
+            if not key:
+                continue
+            row = self.db.execute(
+                "SELECT ts, text, importance FROM memories WHERE scope = ? AND scope_key = ? AND kind = ? "
+                "AND summarized = 0 ORDER BY ts DESC LIMIT 1", (scope, key, SUMMARY_KIND)).fetchone()
+            if row:
+                out.append(Memory(scope, row[0], SUMMARY_KIND, row[1], row[2]))
+        return out
+
+    def summary_candidate(self, *, after: int, keep_recent: int,
+                          skip: set[tuple[str, str]] = frozenset()) -> SummaryCandidate | None:
+        """The layer with the most unsummarized memories beyond after (not in skip): all but its
+        keep_recent newest, and its current summary to fold in."""
+        groups = self.db.execute(
+            "SELECT scope, scope_key, COUNT(*) AS n FROM memories WHERE summarized = 0 AND kind != ? "
+            "GROUP BY scope, scope_key HAVING n > ? ORDER BY n DESC LIMIT 20", (SUMMARY_KIND, after)).fetchall()
+        for scope, key, count in groups:
+            if (scope, key) in skip:
+                continue
+            rows = self.db.execute(
+                "SELECT id, ts, text FROM memories WHERE scope = ? AND scope_key = ? AND summarized = 0 AND kind != ? "
+                "ORDER BY ts, id LIMIT ?", (scope, key, SUMMARY_KIND, count - keep_recent)).fetchall()
+            if not rows:
+                continue
+            previous = self.db.execute(
+                "SELECT id, text FROM memories WHERE scope = ? AND scope_key = ? AND kind = ? AND summarized = 0 "
+                "ORDER BY ts DESC LIMIT 1", (scope, key, SUMMARY_KIND)).fetchone()
+            return SummaryCandidate(scope, key, tuple(row[0] for row in rows), tuple(row[2] for row in rows),
+                                    max(row[1] for row in rows), previous[0] if previous else None,
+                                    previous[1] if previous else None)
+        return None
+
+    def layer_name(self, scope: str, key: str) -> str:
+        """Whose memories a layer holds, for the summary prompt."""
+        if scope == "personal":
+            npc = self.npc(key)
+            return npc.name if npc and npc.name else "a survivor"
+        column = "group_id" if scope == "squad" else "faction_id"
+        value = key if scope == "squad" else key.rsplit("|", 1)[-1]  # faction keys may carry the save
+        row = self.db.execute(f"SELECT faction_name FROM npcs WHERE {column} = ? AND faction_name IS NOT NULL LIMIT 1",
+                              (value,)).fetchone()
+        faction = row[0] if row else None
+        if scope == "squad":
+            return f"a group of {faction}" if faction else "a group of survivors"
+        return faction or "a band of survivors"
+
+    def apply_summary(self, candidate: SummaryCandidate, text: str) -> None:
+        """Stores the summary and marks what it covers (and the summary it replaces)."""
+        covered = list(candidate.ids) + ([candidate.previous_id] if candidate.previous_id is not None else [])
+        self.db.execute(
+            "INSERT INTO memories (scope, scope_key, player_key, ts, kind, text, importance) VALUES (?, ?, NULL, ?, ?, ?, ?)",
+            (candidate.scope, candidate.key, candidate.last_ts, SUMMARY_KIND, text[:SUMMARY_LIMIT], SUMMARY_IMPORTANCE))
+        self.db.executemany("UPDATE memories SET summarized = 1 WHERE id = ?", [(memory_id,) for memory_id in covered])
+        self.db.commit()
 
     def count_memories(self, scope: str, scope_key: str) -> int:
         return self.db.execute("SELECT COUNT(*) FROM memories WHERE scope = ? AND scope_key = ?",

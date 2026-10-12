@@ -21,6 +21,7 @@ require "ALifeBrain/Trade"
 require "ALifeBrain/ALifeBrainHooks"
 require "ALifeBrain/Dialogue"
 require "ALifeBrain/Parley"
+require "ALifeBrain/Pause"
 
 ALifeBrain = ALifeBrain or {}
 
@@ -327,6 +328,11 @@ function Window:prerender()
         local width = getTextManager():MeasureStringX(UIFont.Small, mood)
         self:drawText(mood, self.chatWidth - 16 - width, self.headerHeight > 100 and 84 or 58, 0.66, 0.59, 0.39, 1, UIFont.Small)
     end
+    if self.paused and ALifeBrain.Pause.active() then
+        local note = T.get("paused_header")
+        local width = getTextManager():MeasureStringX(UIFont.Small, note)
+        self:drawText(note, self.chatWidth - 16 - width, 34, 0.55, 0.61, 0.54, 1, UIFont.Small)
+    end
     if self.thinkingSince ~= nil then
         local dots = string.rep(".", math.floor((nowMs() - self.thinkingSince) / 400) % 4)
         self:drawText(T.get("thinking", { name = plain(self.npcName) }) .. dots, 16, self.statusY,
@@ -601,9 +607,18 @@ function Window:onReply(say, reply, outcome)
 end
 
 function Window:onFallback(reason, alifeSaid)
-    self:say("fallback", { reason = tostring(reason) })
+    -- A plain reason where there is one (a refused line, a timeout, a busy provider).
+    local key = "fallback_" .. tostring(reason)
+    self:say(T.has(key) and key or "fallback", { reason = tostring(reason) })
     if type(alifeSaid) == "string" then self:append("npc", alifeSaid) end
     if not self.closed then self:setThinking(false) end
+end
+
+-- The NPC's trust just let the player close to its group, or took that back (Rapport.lua).
+function Window:onRapport(change)
+    self:say("rapport_" .. tostring(change), { name = plain(self.npcName) })
+    local record = Hooks.readRecord(self.uid)
+    if record ~= nil then self.stance = Chat.stanceOf(record, self.player) end
 end
 
 function Window:onDropped()
@@ -662,7 +677,7 @@ function Window:update()
         self.closeAtMs = now + Chat.settings.closeDelayMs
         return
     end
-    self.stance = Hooks.stance(record, player)
+    self.stance = Chat.stanceOf(record, player)
     -- While a reply is pending Dialogue already holds the NPC for longer.
     if Dialogue.pending[self.uid] == nil and not Hooks.inCombat(record) then
         Hooks.hold(record, self.shell, player, now, Chat.settings.holdMs)
@@ -684,6 +699,7 @@ function Window:close()
     ISCollapsableWindow.close(self)
     self:removeFromUIManager()
     if Chat.instance == self then Chat.instance = nil end
+    if self.paused then ALifeBrain.Pause.release() end
 end
 
 -- Horizontal ranges { left, right } of the player's visible inventory and loot windows.
@@ -725,6 +741,13 @@ function Chat.placement(screenWidth, desired, minWidth, ranges)
     return math.floor((screenWidth - width) / 2), width
 end
 
+-- The header's stance: "trusted" for a careful group that lets the player close (Rapport.lua).
+function Chat.stanceOf(record, player)
+    local stance = Hooks.stance(record, player)
+    if stance == "neutral" and ALifeBrain.Rapport.vouches(record, nowMs()) then return "trusted" end
+    return stance
+end
+
 function Chat.open(player, row, fromKey)
     if Chat.instance ~= nil then Chat.instance:close() end
     local core = getCore()
@@ -742,13 +765,15 @@ function Chat.open(player, row, fromKey)
     local window = Window:new(x, (core:getScreenHeight() - height) / 2, width, height)
     window.uid, window.shell, window.player = row.uid, row.shell, player
     window.npcName, window.factionName = row.name, row.factionName
-    window.stance = Hooks.stance(row.record, player)
+    window.stance = Chat.stanceOf(row.record, player)
     window.cachedLines = #(Chat.transcripts[row.uid] or {})
     window.tradeWidth = tradeWidth
     window.trade = Trade.new()
     window:initialise()
     window:addToUIManager()
     Chat.instance = window
+    -- The game waits while the player talks (Pause.lua; single player, Mod Options).
+    window.paused = ALifeBrain.Pause.hold()
     Hooks.hold(row.record, row.shell, player, nowMs(), Chat.settings.holdMs)
     window:loadHistory()
     window.entry:focus()

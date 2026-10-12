@@ -50,6 +50,19 @@ cd sidecar
 python -m unittest discover -v tests
 ```
 
+## Tek dosya sidecar (Python'suz)
+
+```bash
+sidecar\build-exe.cmd
+```
+
+İlk çalıştırmada `sidecar\.venv-build` oluşturur ve PyInstaller'ı kurar; sonucu `sidecar\dist\ALifeBrainSidecar.exe`
+(yaklaşık 9 MB). Exe her yere kopyalanabilir ve Python istemez; çift tıklamak `run-sidecar.cmd` ile aynıdır, aynı
+argümanları alır (`ALifeBrainSidecar.exe --provider fake`, `--verbose`). Ayarlar ve hafıza yine
+`%LOCALAPPDATA%\ALifeBrain\` altındadır. İmzasız exe olduğu için Windows SmartScreen ya da antivirüs ilk açılışta
+uyarabilir. Betik yalnızca derler, sidecar'ı başlatmaz; sonunda sonucu yazıp bir tuşa basmanı bekler (betiklerden
+çağırırken `build-exe.cmd nopause`).
+
 ## Oyunda deneme (1. aşama: ping/pong)
 
 1. Modu Workshop klasörüne bağla (bir kez; `Zomboid/mods`'a dokunmaz):
@@ -66,7 +79,20 @@ python -m unittest discover -v tests
 
 Debug konsolunda: `ALifeBrain.status()`, `ALifeBrain.ping()`, `ALifeBrain.runTests()`,
 `ALifeBrain.spawnTestNpc()` (6 kare doğuna 1 dost NPC, Church Volunteers; A-Life diagnostics'ini açar),
-`ALifeBrain.spawnTestNpc("alife_hobbs", 3)` (başka fraksiyon / sayı).
+`ALifeBrain.spawnTestNpc("alife_hobbs", 3)` (başka fraksiyon / sayı), `ALifeBrain.npcs()` (A-Life'ın NPC kaydı:
+en yakından uzağa durum, kalıcı mı, uzaklık; bu yüklemeden beri silinenler ve nedenleri), `ALifeBrain.trust()`
+(ruh halini bildiğimiz NPC'lerin güveni, korkusu ve sana karşı tutumu).
+
+**Tanıştığın NPC'ler kalır** (varsayılan açık; Mod Options → A-Life Brain → "Tanıştığın NPC'ler kalsın"): sana 10 kare
+yaklaşan her A-Life NPC'si ekibiyle birlikte kalıcı olur; A-Life onu kayda yazar ve sonra uzaklaşsan bile silmez.
+A-Life kendi başına yalnızca kalıcı grupları (karakollar, kalıcı karşılaşmalar, kendi offline ekipleri) kaydeder; gerisi
+tek oturumluktur. A-Life bu tür gruplardan en çok sandbox ayarı "Saved group limit" kadarını (varsayılan 20)
+kaydeder; tutulan gruplar bunu aşarsa oyunda bir uyarı çıkar, ayarı yükselt (en çok 500). Geri almak için önce kutuyu
+kapat, sonra konsolda `ALifeBrain.releaseKept()`.
+
+`spawnTestNpc` NPC'leri kalıcı çağırır. A-Life'ın debug spawner'ı varsayılan olarak **harcanabilir** NPC üretir:
+oyuncu uzaktayken "uyur" (dormant), kimse yaklaşmadan A-Life sandbox ayarı "Unvisited NPC lifetime" (varsayılan 8
+oyun saati) dolunca silinir. Eski davranış için 4. argüman `true` (`spawnTestNpc(nil, 1, nil, true)`).
 
 ## LLM diyalog (2. aşama)
 
@@ -78,6 +104,13 @@ Ayarlar: `%LOCALAPPDATA%\ALifeBrain\config.json` (ilk çalıştırmada varsayıl
 - OpenAI uyumlu servis: anahtar yalnızca `openai.api_key_env` alanında adı geçen ortam değişkeninden okunur;
   dosyaya anahtar yazılmaz.
 - Hafıza: `%LOCALAPPDATA%\ALifeBrain\memory.sqlite3` (NPC'ler, anılar, konuşmalar, güven/korku, atılganlık).
+  Eski anılar özetlenir: bir NPC'nin (ya da ekibinin, fraksiyonunun) anısı 14'ü geçince en yeni 6'sı dışındakiler
+  LLM'le kısa bir özete yazılır (sidecar boştayken, en çok dakikada bir; her özet bir LLM çağrısı). Asıllar silinmez.
+  Kapatmak için `config.json`: `"memory": {"summarize": false}`.
+
+Sohbet penceresi açıkken oyun duraklar (tek oyunculu; Mod Options → A-Life Brain → "Konuşurken oyunu duraklat"),
+kapanınca eski hızında devam eder. Duraklatılmışken envanter tuşu çalışmaz: takas yapacaksan envanteri önce aç.
+Çok oyunculu oyunda oyun duraklatılamadığı için çok oyunculu desteği şimdilik ertelendi.
 
 Oyunda: sidecar'ı başlat (LLM'siz denemek için `run-sidecar-fake.cmd`), dost bir NPC çağır ve yanında `T`'ye
 bas (ya da yere sağ tık → en üstte **A-Life Brain: <ad> ile konuş**). Sohbet penceresi açılır: A-Life'ın
@@ -214,6 +247,11 @@ Kontrol açıkken:
 Gölge modu istatistikleri yalnızca A-Life'ın kendi seçtiği kararları sayar. Policy'nin çalıştırdığı kararlar
 veri setine işaretli yazılır (`chosen`) ama eğitime girmez. Kontrol açıkken sayaçlar 5 dakikada bir `sidecar.log`'a da
 yazılır ("policy control: ..."), yani oynanıştan sonra konsola bakmadan okunabilir.
+
+**Güven tutumu değiştirir:** temkinli bir fraksiyonun NPC'si (A-Life: yaklaşanı "geri dur", "son uyarı" diye uyarır,
+uyarıları dinlemeyene ateş açar) sana en az 5 güvenince bütün grubu yaklaşmana izin verir: A-Life'ın kendi
+`Talk.tolerate` kolu, temkinli → tarafsız; uyarılar durur, pencerenin başlığında "Sana güveniyor" yazar, LLM'e de
+söylenir. Güven 3'ün altına düşünce geri alınır. Düşman gruplar düşman kalır; vurursan grup yine döner.
 
 Takip: LLM takibi kabul ederse NPC, oyuncuya güvensiz (güven < 0) ya da düşman değilse takip eder. Hafıza: fraksiyon
 anıları kayıt (save) başınadır; eski bir kayıtta öldürdüğün biri yeni dünyadaki NPC'lerin hafızasına girmez.

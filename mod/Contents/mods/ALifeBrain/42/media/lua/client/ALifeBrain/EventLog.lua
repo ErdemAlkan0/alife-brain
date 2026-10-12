@@ -9,9 +9,17 @@ ALifeBrain = ALifeBrain or {}
 local Hooks = ALifeBrain.Hooks
 
 local EventLog = {
-    settings = { enabled = true, hitRepeatMs = 750 },
+    settings = {
+        enabled = true,
+        hitRepeatMs = 750,
+        helpTiles = 10, -- an NPC this close to a zombie the player kills saw the player fight for it
+        helpRepeatMs = 60000, -- per NPC: kills in between are added up into the next event
+        friendlyFireTiles = 4, -- a player's hit on an NPC with the dead this close was likely meant for them
+    },
     lastHitAtMs = {},
-    metrics = { hits = 0, deaths = 0, throttled = 0, refused = 0 },
+    lastHelpAtMs = {},
+    helpKills = {},
+    metrics = { hits = 0, deaths = 0, throttled = 0, refused = 0, helped = 0 },
 }
 ALifeBrain.EventLog = EventLog
 
@@ -33,11 +41,19 @@ local function fullType(item)
 end
 
 -- Describes whoever caused an event: a player, another A-Life NPC, or a plain zombie.
-local function actorRef(object)
+-- named: also the NPC's name, faction and squad (deaths only: hits come in every swing). The
+-- sidecar then remembers who really killed a squad mate instead of an unexplained loss the
+-- LLM filled in with the player (play test, 2026-10-11).
+local function actorRef(object, named)
     if object == nil then return nil end
     if Hooks.isPlayer(object) then return { kind = "player", key = Hooks.playerKey(object) } end
     local uid = Hooks.identity(object)
-    if uid ~= nil then return { kind = "npc", uid = uid } end
+    if uid ~= nil then
+        local ref = { kind = "npc", uid = uid }
+        local info = named and Hooks.describe(object) or nil
+        if info ~= nil then ref.name, ref.factionId, ref.groupId = info.name, info.factionId, info.groupId end
+        return ref
+    end
     local ok, zombie = pcall(function() return instanceof(object, "IsoZombie") end)
     if ok and zombie then return { kind = "zombie" } end
     return { kind = "other" }
@@ -68,19 +84,50 @@ function EventLog.onHitZombie(zombie, attacker, bodyPartType, weapon)
     end
     EventLog.lastHitAtMs[npc.uid] = now
     EventLog.metrics.hits = EventLog.metrics.hits + 1
+    -- Shooting the dead around an NPC hits it now and then (shotgun spread): the sidecar takes
+    -- that as an accident, not an attack (play test, 2026-10-11: guards at -11 trust from one shot).
+    local zombiesNear = nil
+    if Hooks.isPlayer(attacker) then zombiesNear = Hooks.zombiesNear(zombie, EventLog.settings.friendlyFireTiles) end
     EventLog.emit("npc_hit", {
         npc = npc,
         by = actorRef(attacker),
         weapon = fullType(weapon),
         bodyPart = bodyPartType ~= nil and tostring(bodyPartType) or nil,
         pos = position(zombie),
+        zombiesNear = zombiesNear,
     })
+end
+
+-- A plain zombie the player killed: the A-Life NPCs right there saw the player fight the dead
+-- beside them ("player_helped"), so they can remember it and trust grows (play test,
+-- 2026-10-11: "I saved you" earned only "prove it", nothing had recorded it). Per NPC at most
+-- one event per helpRepeatMs; the kills in between are counted into the next one.
+function EventLog.onZombieKilled(zombie)
+    local killer = nil
+    pcall(function() killer = zombie:getAttackedBy() end)
+    if killer == nil or not Hooks.isPlayer(killer) then return end
+    local settings, now = EventLog.settings, nowMs()
+    for _, body in ipairs(Hooks.npcBodiesNear(zombie, settings.helpTiles, 6)) do
+        local uid = Hooks.identity(body)
+        if uid ~= nil then
+            local kills = (EventLog.helpKills[uid] or 0) + 1
+            EventLog.helpKills[uid] = kills
+            if now - (EventLog.lastHelpAtMs[uid] or -math.huge) >= settings.helpRepeatMs then
+                local npc = Hooks.describe(body)
+                if npc ~= nil then
+                    EventLog.lastHelpAtMs[uid], EventLog.helpKills[uid] = now, 0
+                    EventLog.metrics.helped = EventLog.metrics.helped + 1
+                    EventLog.emit("player_helped", { npc = npc, by = actorRef(killer), kills = kills, pos = position(zombie) })
+                end
+            end
+        end
+    end
 end
 
 -- Events.OnZombieDead(zombie). A-Life may already have turned the body into a corpse
 -- (ProjectALifeOwned cleared, ProjectALifeCorpseOf set) before this runs.
 function EventLog.onZombieDead(zombie)
-    if not (Hooks.isNpc(zombie) or Hooks.isNpcCorpse(zombie)) then return end
+    if not (Hooks.isNpc(zombie) or Hooks.isNpcCorpse(zombie)) then return EventLog.onZombieKilled(zombie) end
     local npc = Hooks.describe(zombie)
     if npc == nil then return end
     EventLog.lastHitAtMs[npc.uid] = nil
@@ -89,7 +136,7 @@ function EventLog.onZombieDead(zombie)
     EventLog.metrics.deaths = EventLog.metrics.deaths + 1
     EventLog.emit("npc_died", {
         npc = npc,
-        by = actorRef(killer),
+        by = actorRef(killer, true),
         pos = position(zombie),
     })
 end

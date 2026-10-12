@@ -10,15 +10,18 @@
 require "ALifeBrain/Json"
 require "ALifeBrain/Text"
 require "ALifeBrain/Trade"
+require "ALifeBrain/Rapport"
 
 ALifeBrain = ALifeBrain or {}
 
 local Dialogue = {
     settings = {
         enabled = true,
-        -- Player2's free model took 10-17 s per reply when measured; the sidecar gives up at 30 s.
-        timeoutMs = 35000,
-        thinkHoldMs = 36000,
+        -- Player2 answers in 11 s on average, on a slow evening in up to 43 s; the sidecar gives up
+        -- at 60 s (config dialogue.timeout_s) and always answers first, so this only matters if it
+        -- is gone. It was 35 s: a reply that came in at 43 s was lost (play test, 2026-10-12).
+        timeoutMs = 75000,
+        thinkHoldMs = 76000,
         replyHoldMs = 12000,
         quietAfterMs = 180000,
         thinkingText = "...",
@@ -151,6 +154,8 @@ function Dialogue.ask(player, record, shell, text, view, trade, options)
     local request = hooks.dialogueContext(record, shell, player, hooks.nowMs())
     request.text = text
     request.stance = stance
+    -- A careful group that lets the player close because this NPC trusts them (Rapport.lua).
+    request.vouched = ALifeBrain.Rapport.vouches(record, hooks.nowMs()) or nil
     if options.standoff == true then request.standoff = { opening = options.opening == true } end
     request.world = request.world or {}
     request.world.language = ALifeBrain.Text ~= nil and ALifeBrain.Text.language() or nil
@@ -361,17 +366,23 @@ function Dialogue.finish(uid, player, text, ok, reply)
     hooks.hold(record, shell, player, now, Dialogue.settings.replyHoldMs)
     if view == nil then hooks.quietPresence(record, player, Dialogue.settings.quietAfterMs) end
     local mind = Dialogue.remember(uid, reply, now)
+    -- Enough trust and the NPC's careful group lets the player close; too little and it is wary again.
+    local okRapport, rapport = pcall(ALifeBrain.Rapport.onReply, uid, now)
+    rapport = okRapport and rapport or nil
     local outcome = Dialogue.act(player, record, shell, mind, reply, now, entry)
     Dialogue.metrics.answered = Dialogue.metrics.answered + 1
     -- A parley ends when the NPC opens fire (intent attack) or sends the player off (leave).
     if ALifeBrain.Parley ~= nil then pcall(ALifeBrain.Parley.onReply, uid, mind, now) end
     if view ~= nil then
         pcall(view.onReply, view, say, reply, outcome)
-    elseif outcome ~= nil and ALifeBrain.Text ~= nil then
+        if rapport ~= nil and type(view.onRapport) == "function" then pcall(view.onRapport, view, rapport) end
+    elseif ALifeBrain.Text ~= nil then
         -- No window to show it in: tell the player above their head what really happened.
         local info = hooks.describe(shell) or {}
-        local line = ALifeBrain.Text.outcome(outcome, info.name or ALifeBrain.Text.get("survivor"))
+        local name = info.name or ALifeBrain.Text.get("survivor")
+        local line = outcome ~= nil and ALifeBrain.Text.outcome(outcome, name) or nil
         if line ~= nil then hooks.notify(player, line, outcome.ok) end
+        if rapport ~= nil then hooks.notify(player, ALifeBrain.Text.get("rapport_" .. rapport, { name = name }), rapport == "granted") end
     end
     return "answered", outcome
 end
