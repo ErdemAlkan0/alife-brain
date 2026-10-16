@@ -1,140 +1,295 @@
-# A-Life Brain — Project Zomboid NPC'leri için RL + LLM eklentisi
+# A-Life Brain: an RL + LLM add-on for Project Zomboid NPCs
 
-Bu dosya, claude.ai'de yapılan ön tasarım sohbetinin özetidir (Ekim 2026).
-Kullanıcıyla Türkçe konuş. Kod, değişken ve dosya adları İngilizce olsun.
+This file sums up the design conversation held on claude.ai (October 2026).
+Talk to the user in Turkish. Code, variable and file names are in English, and so are all documents in the repository
+(user request, 2026-10-16).
 
-## Hedef
+## Goal
 
-Project Zomboid (Build 42.20+) için **Project A-Life** modunun NPC'lerine şunları eklemek:
-- **RL (pekiştirmeli öğrenme)** ile karar verme: NPC'nin hangi davranışı seçeceği
-- **LLM** ile diyalog ve uzun süreli hafıza
-- Diyalogun davranışı ayarlaması: LLM çıktısı (trust / fear / goal) → RL policy girdisi
+Give the NPCs of the **Project A-Life** mod for Project Zomboid (Build 42.20+):
+- decisions made with **RL (reinforcement learning)**: which behaviour the NPC picks
+- dialogue and long-term memory with an **LLM**
+- dialogue that steers behaviour: LLM output (trust / fear / goal) -> input of the RL policy
 
-## Mimari (3 katman)
+## Architecture (3 layers)
 
-1. **A-Life**: yürüme, çatışma, squad taktikleri, ekran dışı simülasyon. Buna dokunmuyoruz.
-2. **RL policy**: sadece karar katmanı. A-Life'ın mevcut davranışlarından hangisinin seçileceğine karar verir.
-3. **LLM**: diyalog + hafıza. Ürettiği `trust` / `fear` / `goal` değerleri RL policy'nin girdisidir.
+1. **A-Life**: walking, combat, squad tactics, off-screen simulation. We do not touch it.
+2. **RL policy**: the decision layer only. It decides which of A-Life's existing behaviours is chosen.
+3. **LLM**: dialogue + memory. Its `trust` / `fear` / `goal` values are inputs of the RL policy.
 
-Veri akışı:
-PZ Lua addon ⇄ (JSON satırları, dosya köprüsü) ⇄ Python sidecar ⇄ LLM sağlayıcı (Player2 / Ollama / kullanıcının API anahtarı)
+Data flow:
+PZ Lua add-on <-> (JSON lines, file bridge) <-> Python sidecar <-> LLM provider (Player2 / Ollama / the user's API key)
 
-## Kesin kurallar
+## Hard rules
 
-- A-Life dosyalarını **asla düzenleme, kopyalayıp yeniden yükleme**. Ayrı bir addon yaz: `mod.info` içinde `require=\ProjectALifeNPCs`.
-- A-Life NPC'leri zombi gövdesi üzerine kurulu. Tanıma: `zombie:getModData().ProjectALifeOwned == true`.
-- A-Life sık güncelleniyor (v1.3.x, Eylül 2026). İç fonksiyonlara monkey-patch kırılgandır. Kalıcı hook'lar için ekiple Discord'dan (discord.gg/alife) konuşulacak; hook noktalarını tek bir dosyada topla ki güncellemede kolay onarılsın.
-- PZ Lua'sı (Kahlua) sandbox'lı: `io`, socket, HTTP yok. Dış dünyayla iletişim **yalnızca dosya köprüsüyle**.
-- LLM oyunu asla doğrudan kontrol etmez: çıktı sabit JSON şemasıdır, sidecar doğrular ve sınırlar, Lua yalnızca beyaz listedeki `intent` değerlerini uygular.
-- Sidecar kapalıysa veya LLM zaman aşımına uğrarsa mod normal A-Life gibi çalışmaya devam eder (hazır repliklere geri dön).
-- Multiplayer: Player2 girişi oyuncu başına olduğu için LLM çağrıları istemci tarafında yapılır; sunucu `trust_delta` / `fear_delta` değerlerini her zaman yeniden sınırlar (istemci sahteleyebilir).
-- Kendi API anahtarını moda veya sidecar'a **asla gömme**.
+- **Never edit, copy or reload A-Life's files.** Write a separate add-on: `require=\ProjectALifeNPCs` in `mod.info`.
+- A-Life NPCs are built on zombie bodies. Recognise them by `zombie:getModData().ProjectALifeOwned == true`.
+- A-Life is updated often (v1.3.x, September 2026). Monkey-patching its internals is fragile. Lasting hooks are to be
+  discussed with the team on Discord (discord.gg/alife); keep every hook point in one file so an update is easy to
+  repair.
+- PZ's Lua (Kahlua) is sandboxed: no `io`, sockets or HTTP. The outside world is reached **only through the file
+  bridge**.
+- The LLM never controls the game directly: its output is a fixed JSON schema, the sidecar validates and limits it,
+  and Lua applies only whitelisted `intent` values.
+- If the sidecar is down or the LLM times out, the mod keeps working like plain A-Life (fall back to canned lines).
+- Multiplayer: Player2 sign-in is per player, so LLM calls are made on the client; the server always clamps
+  `trust_delta` / `fear_delta` again (a client can fake them).
+- **Never embed your own API key** in the mod or the sidecar.
 
-## Bileşenler
+## Components
 
-### 1) Lua addon (`mod/`)
-- Olay loglama: vuruldu, soyuldu, yemek verildi, squad üyesi öldü vb. Bunlar hem hafıza kaydı hem RL veri seti olur. Soyulma (uygulandı, `Robberies.lua`): A-Life `ModuleRobbery.active` tablosu saniyede bir okunur (yamasız); biten her soygun `robbed_player` olayıyla gider (ekip, `finishedReason`: `released` / `execute:<neden>` / boşa çıktı, alınan eşyaların adları); ekibin her üyesi hatırlar, boyun eğen oyuncuya güven +1 korku −2, direnen −3 / +3.
-- İstek yazma: `getFileWriter("alifebrain_req.txt", true, true)` (kullanıcının `Zomboid/Lua` klasörüne yazar). Alt klasör yerine düz dosya adı kullan.
-- Cevap okuma: `alifebrain_res.txt` dosyasını kısa aralıklarla yokla (OnTick'i seyrelterek).
-- İçerik JSON satırlarıdır ama uzantı `.txt` olmalı: B42 `getFileWriter` yalnızca `txt, ini, cfg, json, lua, log` uzantılarına yazar, diğerlerini (ör. `.jsonl`) **sessizce** reddeder (`LuaManager.ALLOWED_FILE_EXTENSIONS`, 42.21'de doğrulandı). `getFileReader` kısıtlı değil.
-- Her mesajda `id` alanı olsun. Yarım satır okumamak için sidecar önce `.tmp` dosyasına yazıp sonra yeniden adlandırsın. Dosyaları periyodik olarak temizle.
-- Konuşma arayüzü: sohbet penceresi (`ChatWindow.lua`, A-Life'ın `ALifeTalkMenu.lua` penceresi örnek alındı; serbest metin; geçmiş sidecar'dan `history` ile yüklenip üstte gösterilir) + NPC balonu (beklerken "..."). `T` tuşu (`TalkInput.open` sarmalanır) yakında konuşulabilir NPC varsa ve sidecar hazırsa pencereyi açar, değilse A-Life'ın kutusunu; sağ tık menüsünde de en üstte. A-Life kutusu yolunda eylem sonucu oyuncunun üstünde bildirim (halo) olarak gösterilir. Kullanıcı geri bildirimi: oyuncular eşyanın verildiğini görmeli; LLM gerçek eşya adlarını (`inventoryItems`) kullanmalı. Pencere açıkken NPC A-Life'ın `talkHold`'u ile tutulur; kapanınca `ModuleTalkPresence` selamlamaları 3 dk susturulur. Pencere açıkken oyun duraklatılır (`Pause.lua`, Mod Options "Konuşurken oyunu duraklat", varsayılan açık; oyunun kendi duraklatması: `SpeedControls:SetCurrentGameSpeed(0)`, kapanınca eski hız, oyuncu arada hızı değiştirdiyse o kalır). Duraklatılınca `OnTick` durur: köprü ve diyalog `OnTickEvenPaused` ile çalışmaya devam eder (`Main.onTickEvenPaused`), dünya işleri (A-Life kararları, Parley, Keeper) oyunla bekler. Duraklatılmışken vanilla envanter tuşu çalışmaz (`getGameSpeed() > 0`). Çok oyunculu oyunda duraklatılamaz: kullanıcı kararıyla (2026-10-11) çok oyunculu desteği ertelendi.
-- RL çıkarımı: küçük MLP ağırlıkları bir Lua tablosunda, ileri geçiş oyunun içinde (köprüyü beklemez). NPC başına birkaç saniyede bir çalışır.
-- Kendi A-Life tepki modüllerimiz (`Hooks.MODULES`, profil `overlays`'ına çalışma zamanında eklenir): `alifeBrainParley` (29, `Parley.lua`: düşman NPC ateşten önce konuşur; ekibe A-Life'ın `memory.robberyTruce` ateşkesi yazılır; pencere kapanırsa / saldırı / `intent attack` / 45 s sessizlik → çatışma, haraç ya da `leave` → ateşkes. Konuşmadan ateş: grubun kendi kini `hostileToPlayerKeys`, son 2 dk'da vurulmuş grup, çatışmada, A-Life soygunu, araçta. A-Life itibarı bir saldırıda bütün fraksiyonu kalıcı düşman yapar; böyle "yalnızca fraksiyon" kinli ekip pazarlık eder (`feud`, oyun testi 2026-10-12: 26 ekipten 17'si tek söz etmeden ateş açtı). Göremeyen NPC 8 s görmeyi bekler), `alifeBrainStandoff` (31, `Standoff.lua`: NPC↔NPC uyarı merdiveni, A-Life `CAREFUL_*` sesleri), `alifeBrainCompanion` (32). Takipçi, oyuncu eğilince `Stealth.stanceActive` sarmalayıcısıyla eğilir ve koşmaz.
-- Davranış klonlama (3. aşama, uygulandı): `Hooks.installDecisionTap` A-Life'ın modül zincirlerini yalnızca izler; `DecisionLog.lua` kararları örnekler (NPC+zincir başına seçim değişince ya da 3 s'de bir, saniyede en çok 20) ve `decision_samples` olayıyla gönderir; sidecar `%LOCALAPPDATA%\ALifeBrain\dataset\` altına yazar. Eylem = A-Life modül id'si ya da `default`; gözlem = `Features.lua` (şema 1, 43 özellik; aynı kod hem veri hem çıkarım için kullanılır, özellik değişirse `SCHEMA` artırılır). Eğitim `rl\run-bc.cmd` (numpy, `rl/.venv`), çıktı `PolicyWeights.lua` (yer tutucu `return nil`; dışa aktarıcı bir kontrol girdisi ve logitlerini ekler, oyun yüklerken `Policy.check` ile doğrular). Gölge modunda karar vermez, A-Life ile ne kadar aynı seçtiğini sayar (`ALifeBrain.policy()`); kontrol 5. aşamada (aşağıda).
-- Policy kontrolü (5. aşama, uygulandı; varsayılan kapalı: Mod Options tik kutusu `PZAPI.ModOptions`, ya da `ALifeBrain.control(true)`): `Hooks.wrapEvaluate` tam zincirden **önce** `Control.pick`'e sorar, seçilen modül `only` ile tek başına çalışır, `nil` dönerse A-Life'ın zinciri çalışır (modüller `evaluate` içinde hareket/ses başlattığı için zincir önce çalıştırılıp sonradan değiştirilemez). Policy yalnızca seçim ekler: `default`, `talk`, `robbery`, `orders`, takipçi ve pazarlık modüllerini hiç seçmez; oyuncu emri, konuşma, soygun, pazarlık/NPC merdiveni, oyuncu tehdidi ve 55 kare içinde oyuncuya düşman NPC (A-Life `ModuleRobbery.detectRadius`) A-Life'ta kalır; oyuncu 20 karenin içindeyken yalnızca `careful` ekleyebilir (A-Life uyarı yarıçapı 14, selamlama 6). NPC+zincir başına 2,5 s önbellek. Seçtiği kararlar veri setine `c` (sidecar `chosen`) işaretiyle yazılır, BC bunları atlar; kontrol açıkken kaydedilen satırlar `ctl`; sayaçlar 5 dakikada bir `policy_stats` olayıyla `sidecar.log`'a gider. Konuşulmamış NPC'lerin kayıtlı ruh hali `Moods.lua` ile (`moods` isteği) `Dialogue.minds`'a gelir.
-- JSON için Kahlua uyumlu saf Lua kütüphanesi kullan ve Kahlua'da test et. Oyun olmadan: `rl\.venv\Scripts\python tests\lua\run_tests.py` (lupa, standart Lua 5.1; Kahlua'dan farkları var, son söz oyundaki `-debug` testleri).
-- Kahlua tuzakları (oyunda doğrulandı):
-  - `a % b`, `a / b` bölümü 2³¹'i aşınca yanlış sonuç verir (içeride 32 bit int dönüşümü var; bölme işleminin kendisi doğru). Milisaniye zaman damgalarında `%` kullanma; sayıyı metne çevirmek için `Json.intToString` kullan.
-  - Debug modunda (`-debug`) `pcall` ile yakalanan hatalar da konsola yığın izi olarak dökülür; bu bir hata değildir.
-  - `string.byte` UTF-16 birimi döndürür (> 255 olabilir); `string.char(300)` çalışır.
-  - `next` yok ("Object tried to call nil"); bir tablonun boş olup olmadığını `pairs` ile say.
-- NPC'lerin kalıcılığı ("oyuna girip çıkınca NPC'ler siliniyor", 2026-10-11): A-Life kayda yalnızca kalıcı grupları yazar (`Persistence.forSave`: kendi offline squad defteri, karakollar ve `memory.persistent` / encounter grupları, sandbox "Saved group limit" = `Persistence.squadCap`, varsayılan 20); geri kalan NPC'ler tek oturumluktur, uyurken "Unvisited NPC lifetime" (8 oyun saati) dolunca da silinir. `Keeper.lua` (varsayılan açık, Mod Options "Tanıştığın NPC'ler kalsın"): oyuncuya 10 kare yaklaşan NPC'nin bütün grubuna `Talk.writeMemory` ile `persistent = true` + `alifeBrainKeptAtMs` yazar (`Hooks.keepGroupOf`; offline squad ve karakol görev ekipleri A-Life'ın, dokunulmaz); kalıcı grup sınırı aşılırsa bir kez uyarır; `ALifeBrain.releaseKept()` geri alır. `ALifeBrain.spawnTestNpc` `persistent = true` gönderir; `ALifeBrain.npcs()` A-Life kaydını, kaydedilecek grup sayısını ve silinme nedenlerini (`Telemetry` halkası) gösterir.
-- Mod Options: tik kutusu `ModOptions.ini`'de `true` iken oyunda "off" göründü (2026-10-11; önce oyunun yükleyicisi CRLF satırın `\r`'ını bırakıyor sanıldı); `Main.loadOptions` kendi satırımızı da okur, açılış logu `saved` / `menu` değerlerini yazar. Asıl neden (2026-10-14, log: "off (Mod Options: saved true, menu true)"): aşağıdaki test kalıntısı (`Control.forced`).
-- Oyun içi testler (`-debug` açılışında `ALifeBrain.runTests()`) canlı modül tablolarında çalışır. Sahte koyan test eski değerleri `Tests.keeping(target, fields, body)` ile geri koymalı: `for k, v in pairs(saved)` nil'leri atlar ve 2026-10-14'e kadar `Control.forced/override`, `Moods`, `Robberies`, `Rapport` sahteleri oyunda kaldı (policy kontrolü hep kapalı, Rapport gerçek NPC görmedi, soygun anıları ve kayıtlı ruh halleri sahte köprüye gitti). `Tests.runAll` her modülün `override` / `forced` alanını önce ve sonra karşılaştırır; değişmiş bulursa testi başarısız sayar ve geri koyar.
-- PZ arayüz tuzağı (oyunda görüldü): `ISCollapsableWindow` türevinde `render` / `prerender` adlarını başka iş için kullanma; ezersen üst sınıfı çağır. `prerender` stencil (kırpma) açar, `render` kapatır; kapanmazsa sonra çizilen bütün pencereler (ör. tıklanınca öne gelen envanter) bu pencerenin dikdörtgenine kırpılır ve görünmez olur.
+### 1) Lua add-on (`mod/`)
+- Event logging: hit, robbed, fed, a squad member died, and so on. These become both memories and the RL dataset.
+  Robberies (implemented, `Robberies.lua`): A-Life's `ModuleRobbery.active` table is read once a second (no patch);
+  every robbery that ends is sent as a `robbed_player` event (crew, `finishedReason`: `released` / `execute:<reason>` /
+  came to nothing, names of the items taken); every member of the crew remembers it; a player who gives in gets
+  trust +1 fear -2, one who resists -3 / +3.
+- Writing requests: `getFileWriter("alifebrain_req.txt", true, true)` (writes into the user's `Zomboid/Lua` folder).
+  Use a flat file name, not a subfolder.
+- Reading replies: poll `alifebrain_res.txt` at short intervals (thinning out OnTick).
+- The content is JSON lines but the extension must be `.txt`: B42 `getFileWriter` writes only `txt, ini, cfg, json,
+  lua, log` and **silently** refuses anything else (such as `.jsonl`) (`LuaManager.ALLOWED_FILE_EXTENSIONS`, verified
+  on 42.21). `getFileReader` is not restricted.
+- Every message has an `id`. So that half lines are never read, the sidecar writes to a `.tmp` file first and then
+  renames it. Clean the files up periodically.
+- Conversation UI: a chat window (`ChatWindow.lua`, modelled on A-Life's `ALifeTalkMenu.lua` window; free text; the
+  history is loaded from the sidecar with `history` and shown at the top) + an NPC speech bubble ("..." while it
+  waits). The `T` key (`TalkInput.open` is wrapped) opens the window when a talkable NPC is near and the sidecar is
+  ready, A-Life's box otherwise; it is also at the top of the right-click menu. On A-Life's box path the outcome of an
+  action is shown above the player (halo). User feedback: players must see that an item was handed over; the LLM must
+  use real item names (`inventoryItems`). While the window is open the NPC is held with A-Life's `talkHold`; when it
+  closes, `ModuleTalkPresence` greetings are muted for 3 minutes. The game is paused while the window is open
+  (`Pause.lua`, Mod Options "Pause the game while talking", on by default; the game's own pause:
+  `SpeedControls:SetCurrentGameSpeed(0)`, the old speed when it closes, or the speed the player chose in between).
+  When paused, `OnTick` stops: the bridge and the dialogue keep running on `OnTickEvenPaused` (`Main.onTickEvenPaused`),
+  world work (A-Life decisions, Parley, Keeper) waits with the game. While paused the vanilla inventory key does not
+  work (`getGameSpeed() > 0`). A multiplayer game cannot be paused: by the user's decision (2026-10-11) multiplayer
+  support is postponed.
+- The UI is English only (`Text.lua`; it had a Turkish translation until 2026-10-16). `Text.language()` still sends the
+  game's language code to the LLM (`world.language`): an NPC that speaks first answers in it; otherwise NPCs answer in
+  the language the player writes in, Turkish and English alike.
+- RL inference: small MLP weights in a Lua table, forward pass inside the game (it never waits for the bridge). Runs
+  every few seconds per NPC.
+- Our own A-Life response modules (`Hooks.MODULES`, added to the profiles' `overlays` at run time):
+  `alifeBrainParley` (29, `Parley.lua`: a hostile NPC talks before it shoots; the crew gets A-Life's
+  `memory.robberyTruce` truce; window closed / attack / `intent attack` / 45 s of silence -> fight, toll or `leave` ->
+  truce. It shoots without a word when its own group holds a grudge (`hostileToPlayerKeys`), when the player hit the
+  group in the last 2 minutes, while it is fighting, during an A-Life robbery, or when the player is in a vehicle.
+  A-Life's reputation makes a whole faction hostile for good after one attack; such a crew, hostile only through its
+  faction, parleys (`feud`; play test 2026-10-12: 17 of 26 crews opened fire without a word). An NPC that cannot see
+  the player waits 8 s for sight), `alifeBrainStandoff` (31, `Standoff.lua`: NPC<->NPC warning ladder, A-Life's
+  `CAREFUL_*` voices), `alifeBrainCompanion` (32). A follower crouches with the player through a `Stealth.stanceActive`
+  wrapper and does not run.
+- Behaviour cloning (phase 3, implemented): `Hooks.installDecisionTap` only watches A-Life's module chains;
+  `DecisionLog.lua` samples decisions (per NPC + chain when the choice changes or every 3 s, at most 20 per second) and
+  sends them as `decision_samples` events; the sidecar writes them under `%LOCALAPPDATA%\ALifeBrain\dataset\`. Action =
+  an A-Life module id or `default`; observation = `Features.lua` (schema 1, 43 features; the same code produces data
+  and inference input; bump `SCHEMA` when features change). Training with `rl\run-bc.cmd` (numpy, `rl/.venv`), output
+  `PolicyWeights.lua` (placeholder `return nil`; the exporter adds a check input and its logits, verified by
+  `Policy.check` when the game loads). In shadow mode it makes no decisions and counts how often it agrees with A-Life
+  (`ALifeBrain.policy()`); control comes in phase 5 (below).
+- Policy control (phase 5, implemented; off by default: Mod Options tick box through `PZAPI.ModOptions`, or
+  `ALifeBrain.control(true)`): `Hooks.wrapEvaluate` asks `Control.pick` **before** the full chain, the chosen module
+  runs alone with `only`, and when it returns `nil` A-Life's chain runs (modules start movement and voices inside
+  `evaluate`, so the chain cannot run first and be overridden later). The policy only adds choices: it never picks
+  `default`, `talk`, `robbery`, `orders`, the follower or the parley modules; player orders, conversations, robberies,
+  parleys / NPC ladders, the player as a threat and an NPC hostile to a player within 55 tiles (A-Life
+  `ModuleRobbery.detectRadius`) stay with A-Life; with a player within 20 tiles it may only add `careful` (A-Life's
+  warning radius is 14, greeting 6). Cached for 2.5 s per NPC + chain. The decisions it chose go into the dataset
+  marked `c` (sidecar `chosen`) and BC skips them; rows logged while control is on are marked `ctl`; counters go to
+  `sidecar.log` every 5 minutes as a `policy_stats` event. Stored moods of NPCs not talked to come into
+  `Dialogue.minds` through `Moods.lua` (`moods` request).
+- Use a pure-Lua JSON library that works in Kahlua, and test it in Kahlua. Without the game:
+  `rl\.venv\Scripts\python tests\lua\run_tests.py` (lupa, standard Lua 5.1; it differs from Kahlua, the in-game
+  `-debug` tests have the last word).
+- Kahlua pitfalls (verified in game):
+  - `a % b` and `a / b` give wrong results past 2^31 (there is a 32-bit int conversion inside; the division itself is
+    right). Never use `%` on millisecond timestamps; turn numbers into text with `Json.intToString`.
+  - In debug mode (`-debug`) errors caught by `pcall` are printed to the console as stack traces too; that is not an
+    error.
+  - `string.byte` returns UTF-16 units (may be > 255); `string.char(300)` works.
+  - There is no `next` ("Object tried to call nil"); count with `pairs` to see whether a table is empty.
+- NPC persistence ("NPCs seem deleted after reloading", 2026-10-11): A-Life writes only persistent groups into the save
+  (`Persistence.forSave`: its own offline squad ledger, outposts and `memory.persistent` / encounter groups, sandbox
+  "Saved group limit" = `Persistence.squadCap`, default 20); every other NPC lives for one session and is also deleted
+  while asleep once "Unvisited NPC lifetime" (8 game hours) runs out. `Keeper.lua` (on by default, Mod Options "Keep NPCs
+  you meet"): writes `persistent = true` + `alifeBrainKeptAtMs` with `Talk.writeMemory` to the whole group of any NPC
+  that comes within 10 tiles of the player (`Hooks.keepGroupOf`; offline squads and outpost task squads belong to
+  A-Life and are left alone); warns once when the persistent group limit is exceeded; `ALifeBrain.releaseKept()` undoes
+  it. `ALifeBrain.spawnTestNpc` sends `persistent = true`; `ALifeBrain.npcs()` shows A-Life's registry, the number of
+  groups to be saved and why NPCs were deleted (`Telemetry` ring).
+- Mod Options: the tick box showed "off" in game while `ModOptions.ini` said `true` (2026-10-11; at first we thought
+  the game's loader kept the `\r` of a CRLF line); `Main.loadOptions` also reads our own line and the startup log
+  writes the `saved` / `menu` values. The real cause (2026-10-14, log: "off (Mod Options: saved true, menu true)"): the
+  test leftover below (`Control.forced`).
+- In-game tests (`ALifeBrain.runTests()` at a `-debug` startup) run on the live module tables. A test that installs
+  fakes must put the old values back with `Tests.keeping(target, fields, body)`: `for k, v in pairs(saved)` skips the
+  nils, and until 2026-10-14 the `Control.forced/override`, `Moods`, `Robberies` and `Rapport` fakes stayed in the
+  game (policy control always off, Rapport never saw a real NPC, robbery memories and stored moods went to a fake
+  bridge). `Tests.runAll` compares every module's `override` / `forced` field before and after; when one changed it
+  counts a failed test and puts it back.
+- PZ UI pitfall (seen in game): in an `ISCollapsableWindow` subclass never use the names `render` / `prerender` for
+  anything else; if you override them, call the superclass. `prerender` opens a stencil (clipping) and `render` closes
+  it; if it stays open, every window drawn later (such as an inventory brought to the front with a click) is clipped
+  to this window's rectangle and disappears.
 
 ### 2) Python sidecar (`sidecar/`)
-- `alifebrain_req.txt` dosyasını izle → LLM'i çağır → `alifebrain_res.txt` dosyasına yaz. Protokol: `docs/bridge-protocol.md`.
-- Sağlayıcı soyutlaması (OpenAI uyumlu): Player2 (varsayılan), Ollama, kullanıcının kendi API anahtarı. Geçiş tek bir ayarla yapılır.
-- Hafıza: SQLite, NPC kimliğine bağlı; katmanlar: kişisel / squad / fraksiyon. Fraksiyon anıları kayıt (save) başına: her mesajda `world` = `<oyun modu>/<kayıt adı>` gelir, anahtar `<world>|<fraksiyon>` (A-Life rol adlarını her ekipte tekrar kullanır; eski test kayıtlarındaki ölümler yeni dünyada oyuncuya yükleniyordu, 2026-10-11). Kişisel (uid) ve squad (groupId) anahtarları zaten kayda özgü. Aynı kayıtta da adlar tekrarlanır: fraksiyon anısı "one of our people in another group" der ve ölenin kendi squad'ına gösterilmez. Squad kaybı katili adıyla yazılır ("Gus - Rifleman killed Deputy Rowe, not the stranger"; `npc_died.by` NPC katilin adını/squad'ını taşır); yalnızca "We lost X" kalınca LLM suçu oyuncuya yüklüyordu. Prompt kuralı: yabancıyı yalnızca anıların ya da konuşmanın gösterdiği şey için suçla. Prompt'a yalnızca en yeni, önemli ve ilgili birkaç anı ile bir özet girer. Eski anıları periyodik olarak özetle. **Uygulandı** (`summary.py`, config `memory`): bir katmanda (NPC, squad, fraksiyon) özetlenmemiş anı 14'ü geçince en yeni 6'sı dışındakiler (ve önceki özet) LLM'le birinci şahıs, en çok 3 cümle / 400 karakterlik bir özete yazılır; asıllar silinmez, `memories.summarized = 1` olur ve recall'dan çıkar (eski veritabanına sütun açılışta eklenir). Sidecar bunu yalnızca bekleyen cevap yokken ve en çok dakikada bir yapar; başarısız katman 10 dk bekler. Prompt'ta "From before:" altında katman başına son özet, sonra "What you remember:".
-- Dağıtım: tek .exe (PyInstaller), oyuncunun Python kurmasına gerek kalmasın. **Uygulandı:** `sidecar\build-exe.cmd` (ilk çalıştırmada `sidecar\.venv-build` + PyInstaller) → `sidecar\dist\ALifeBrainSidecar.exe` (~9 MB, `--onefile --console`, giriş `sidecar\packaging\launcher.py`; `run-sidecar.cmd` ile aynı argümanlar; hata olursa pencere Enter'a kadar açık kalır). 2026-10-11'de derlenip sahte sağlayıcıyla ping/pong denendi.
+- Watch `alifebrain_req.txt` -> call the LLM -> write `alifebrain_res.txt`. Protocol: `docs/bridge-protocol.md`.
+- Provider abstraction (OpenAI compatible): Player2 (default), Ollama, the user's own API key. One setting switches.
+- Memory: SQLite, keyed by NPC id; layers: personal / squad / faction. Faction memories are per save: every message
+  carries `world` = `<game mode>/<save name>`, the key is `<world>|<faction>` (A-Life reuses role names in every crew;
+  deaths from old test saves were blamed on the player in a new world, 2026-10-11). Personal (uid) and squad (groupId)
+  keys are already specific to a save. Names repeat within one save as well: a faction memory says "one of our people
+  in another group" and is not shown to the dead NPC's own squad. A squad loss is written with the killer's name ("Gus
+  - Rifleman killed Deputy Rowe, not the stranger"; `npc_died.by` carries an NPC killer's name / squad); with only "We
+  lost X" the LLM blamed the player. Prompt rule: blame the stranger only for what memories or the conversation show.
+  Only a few of the newest, important and relevant memories and a summary go into the prompt. Old memories are
+  summarized now and then. **Implemented** (`summary.py`, config `memory`): when a layer (NPC, squad, faction) has
+  more than 14 unsummarized memories, all but the newest 6 (and the previous summary) are rewritten by the LLM into a
+  first-person summary of at most 3 sentences / 400 characters; the originals are not deleted, they get
+  `memories.summarized = 1` and leave recall (the column is added to an old database on startup). The sidecar does this
+  only while no reply is pending and at most once a minute; a layer that failed waits 10 minutes. The prompt lists the
+  latest summary per layer under "From before:", then "What you remember:".
+- Distribution: a single .exe (PyInstaller), so players need no Python. **Implemented:** `sidecar\build-exe.cmd` (the
+  first run creates `sidecar\.venv-build` + PyInstaller) -> `sidecar\dist\ALifeBrainSidecar.exe` (~9 MB,
+  `--onefile --console`, entry `sidecar\packaging\launcher.py`; the same arguments as `run-sidecar.cmd`; after an error
+  the window stays open until Enter). Built on 2026-10-11 and tried with the fake provider (ping/pong). Release zip:
+  `python release\make_release.py` -> `dist\ALifeBrain-<version>.zip` (mod, exe, `INSTALL.txt`); it refuses an exe older
+  than the sidecar's sources and any file holding this machine's Player2 client id.
 
-### 3) LLM çıktı şeması
+### 3) LLM output schema
 
 ```json
 {"say": "...", "memory_note": "...", "trust_delta": 0, "fear_delta": 0, "goal_delta": 0, "intent": "warn"}
 ```
 
-- `intent` beyaz listesi: none, give, follow, stay, leave, trade, warn, attack, rob, give_info. Şemaya `item` alanı eklendi (`give` için: water, food, medicine).
-- Takas (`Trade.lua` + pencerenin sağ bölümü): oyuncu envanterden sürükler (Inventory Tetris uyumlu: `ISMouseDrag.dragging` + Tetris `DragAndDrop.getDraggedStacks/endDrag`; bırakılan yer UI olduğu için Tetris yere atmaz), NPC eşyalarına tıklayarak ister; LLM `trade.decision` accept/reject/counter döner, karşı teklifte `npc_wants` ile oyuncudan ne istediğini söyler (oyuncunun tarafı bununla doldurulur). Veresiye yok (kullanıcı isteği: oyuncu NPC'nin eşyasını alıp karşılığını vermeden kaçamamalı): NPC'nin eşyası yalnızca oyuncunun karşılığı aynı değişimdeyken çıkar (`unpaid`), önce oyuncunun eşyaları taşınır, hata olursa hepsi geri alınır; pazarlığın parçası olan `give` sidecar'da takas önerisine çevrilir. Değişimi `Hooks.executeTrade` yapar (önce her şey yeniden doğrulanır; elde/üstte/takılı eşyalar, anahtarlar, favoriler ve içi dolu çantalar asla takas edilmez). Sürüklemeyi bitiren alıcı vanilla protokolüne uymalı: önce `ISMouseDrag.draggingFocus:onMouseUp(0,0)` (kaynak liste paneli kendi sürükleme durumunu ancak böyle sıfırlar; atlanırsa envanter yarım sürüklemede takılı kalır), sonra Tetris `endDrag`. Pencerenin metin kutusu klavyeyi yalnızca pencereye tıklanınca alır; dışarı (envanter, dünya) tıklanınca bırakır, yoksa Tetris döndürme ve envanter tuşları çalışmaz. Pencere görünür envanter pencerelerinin yanındaki boşluğa açılır. Doğrudan `Remove`/`AddItem` sonrası kaplar `setDrawDirty` + `ISInventoryPage.dirtyUI()` ile yenilenir; Tetris ızgarası yerleşmeyen eşyayı kendisi başka çantaya ya da yere taşır. Bilinen sınır: A-Life NPC'yi bellekten silip yeniden oluşturursa ona verilen eşyalar kaybolabilir (A-Life'ın kendi Supplies davranışıyla aynı).
-- Oyunun uyguladığı eylemler (`Dialogue.act`, A-Life mekanizmalarıyla): `give` (A-Life `TalkSupplies.matches` kurallarıyla NPC envanterinden oyuncuya; oyuncu-NPC başına saatte en çok 3, 20 s aralık), `follow` / `stay` (`DecisionLoop.setOrder`, 10 dk; takip için dost tutum ya da güven ≥ 0 ve düşman olmamak; LLM güveni cevap başına 1–3 oynattığından eski ≥ 10 eşiğinde NPC "gidelim" deyip kalıyordu; A-Life'ta tehdit tepkisi emirlerden önce gelir ve takibin tasması yoktur, takipçi her zombiye saldırıyordu: `Companion.lua` + `alifeBrainCompanion` tepki modülü takipçiyi oyuncunun yanında tutar — oyuncudan 8 kareden uzak zombiyi kovalamaz, kalabalıktan (yakın dövüşte 3, silahla 6 zombi / 4 kare) ve can < %50 iken geri çekilir), `leave` (pencereyi kapatır). trade / warn / attack / rob / give_info yalnızca kaydediliyor. Sonuç `npc_action` olayıyla sidecar'a gider ve NPC'nin hafızasına "gerçekte olan" olarak yazılır. LLM'e envanteri ve "eylem yapmadan yaptım deme" kuralı prompt'ta verilir.
-- Delta'lar sidecar'da sınırlanır (güven/korku ±10, oyuncu başına). Geçersiz JSON → hazır replik.
-- Güven tutumu değiştirir (oyun testi 2026-10-11: takastan sonra güven 5–6 iken NPC "yaklaşma" demeye devam etti, pencere kapanınca A-Life'ın temkinli uyarı merdiveni grubu oyuncuya çevirdi; A-Life tutumu yalnızca fraksiyondan hesaplar). `Rapport.lua`: bildiğimiz en güvenen üyesi güven ≥ 5 olan temkinli grup oyuncuyu tolere eder (A-Life `Talk.tolerate` → `memory.tolerateUntil`, temkinli → tarafsız, bütün grup; 10 dk, yenilenir; güven < 3 olunca yalnızca kendi yazdığımızı geri alır). Cevap gelir gelmez uygulanır (`Rapport.onReply`), istekte `vouched: true` ile prompt "geri dur deme" der, pencere başlığı "Sana güveniyor". Düşman gruplar düşman kalır. Konsol: `ALifeBrain.trust()`. Olaylar güveni sidecar'da değiştirir (hediye +6, takas +2, yardım +3, vuruş, soygun) ama oyun eskiden yalnızca bir sonraki cevapta öğreniyordu (Henry: sidecar 13, oyun 7): artık `EventLog.MOOD_EVENTS` / `Dialogue.report` → `Moods.refresh` → `Dialogue.updateMood`; konuşmadan, yalnızca iyilikle de güven izni gelir.
-- Güven kazanmak (oyun testi 2026-10-11: güven hep 0/−1, "kanıtla" döngüleri): prompt güvenin nasıl değiştiğini sayılarla söyler (dostça konuşma +1/+2, yardım/paylaşım/söz tutma/birlikte savaşma +3…+6) ve aynı kanıtı tekrar istemeyi yasaklar; temkinli tutum metni artık "uzak dur" demez. İyilikler hafızaya ve güvene işler: NPC'nin 10 karesinde zombi öldürmek (`player_helped`), hediye (+6) ve adil takas (+2); zombilerin arasındayken gelen isabet kaza sayılır (−3, `npc_hit.zombiesNear`).
-- `goal_delta` (±25): NPC'nin atılganlığı (policy'nin `goal` girdisi, −100 sakin dur ↔ 100 ganimet/risk), NPC başına SQLite `drives` tablosunda, 30 dk yarı ömürle 0'a söner (sidecar `memory.GOAL_HALF_LIFE_MS` = oyun `Dialogue.GOAL_HALF_LIFE_MS`). Sohbet penceresinde "Atılganlık".
+- `intent` whitelist: none, give, follow, stay, leave, trade, warn, attack, rob, give_info. An `item` field was added to
+  the schema (for `give`: water, food, medicine).
+- Trading (`Trade.lua` + the right part of the window): the player drags from the inventory (Inventory Tetris
+  compatible: `ISMouseDrag.dragging` + Tetris `DragAndDrop.getDraggedStacks/endDrag`; the drop target is UI, so Tetris
+  does not drop the item on the ground) and clicks the NPC's items to ask for them; the LLM returns `trade.decision`
+  accept/reject/counter, and in a counter-offer says with `npc_wants` what it wants from the player (the player's side
+  is filled with it). No credit (user request: the player must not take the NPC's items and run without paying): the
+  NPC's items leave only when the player's part is in the same exchange (`unpaid`); the player's items move first, and
+  on an error everything is moved back; a `give` that is part of a bargain becomes a trade offer in the sidecar.
+  `Hooks.executeTrade` makes the exchange (everything is validated again first; held / worn / attached items, keys,
+  favourites and bags with items inside are never traded). The receiver that ends a drag must follow the vanilla
+  protocol: first `ISMouseDrag.draggingFocus:onMouseUp(0,0)` (the source list panel resets its own drag state only
+  this way; skip it and the inventory stays stuck half-dragged), then Tetris `endDrag`. The window's text box takes
+  the keyboard only after a click in the window and lets it go after a click outside (inventory, world), or Tetris
+  rotation and inventory keys stop working. The window opens in the free space beside visible inventory windows.
+  After a direct `Remove` / `AddItem`, containers are refreshed with `setDrawDirty` + `ISInventoryPage.dirtyUI()`; the
+  Tetris grid moves an item that does not fit into another bag or onto the ground by itself. Known limit: if A-Life
+  deletes the NPC from memory and creates it again, the items given to it may be lost (the same as A-Life's own
+  Supplies behaviour).
+- Actions the game carries out (`Dialogue.act`, through A-Life's mechanisms): `give` (from the NPC's inventory to the
+  player by A-Life's `TalkSupplies.matches` rules; at most 3 per hour per player-NPC, 20 s apart), `follow` / `stay`
+  (`DecisionLoop.setOrder`, 10 minutes; following needs a friendly stance, or trust >= 0 and not hostile; the LLM moves
+  trust 1-3 per reply, so at the old threshold of >= 10 NPCs said "let's go" and stayed put; in A-Life the threat
+  response comes before orders and a follow has no leash, so a follower attacked every zombie: `Companion.lua` + the
+  `alifeBrainCompanion` response module keep the follower beside the player: it does not chase zombies more than
+  8 tiles from the player and falls back from crowds (3 zombies within 4 tiles in melee, 6 with a gun) and below 50%
+  health), `leave` (closes the window). trade / warn / attack / rob / give_info are only recorded. The outcome goes to
+  the sidecar as an `npc_action` event and is written into the NPC's memory as "what really happened". The prompt gives
+  the LLM the inventory and the rule "never claim you did something without the action".
+- Deltas are clamped in the sidecar (trust / fear ±10, per player). Invalid JSON -> canned line.
+- Trust changes the stance (play test 2026-10-11: after a trade, with trust at 5-6 the NPC kept saying "keep away", and
+  when the window closed A-Life's careful warning ladder turned the group on the player; A-Life works out the stance
+  from the faction alone). `Rapport.lua`: a careful group whose most trusting known member trusts the player >= 5
+  tolerates the player (A-Life's `Talk.tolerate` -> `memory.tolerateUntil`, careful -> neutral, the whole group;
+  10 minutes, renewed; when trust drops below 3 it withdraws only what it wrote itself). It acts as soon as a reply
+  arrives (`Rapport.onReply`); the request carries `vouched: true` and the prompt says "do not tell them to keep
+  away"; the window header says "Trusts you". Hostile groups stay hostile. Console: `ALifeBrain.trust()`. Events change
+  trust in the sidecar (gift +6, trade +2, help +3, a hit, a robbery), but the game used to learn it only at the next
+  reply (Henry: 13 in the sidecar, 7 in the game): now `EventLog.MOOD_EVENTS` / `Dialogue.report` -> `Moods.refresh` ->
+  `Dialogue.updateMood`; trust earned by deeds alone, without talking, also lets the player close.
+- Earning trust (play test 2026-10-11: trust always 0 / -1, "prove it" loops): the prompt says with numbers how trust
+  changes (friendly talk +1/+2, help / sharing / keeping a promise / fighting together +3...+6) and forbids asking for
+  the same proof again; the careful stance text no longer says "stay away". Good deeds go into memory and trust:
+  killing zombies within 10 tiles of the NPC (`player_helped`), a gift (+6) and a fair trade (+2); a hit taken among
+  zombies counts as an accident (-3, `npc_hit.zombiesNear`).
+- `goal_delta` (±25): the NPC's drive (the policy's `goal` input, -100 lie low <-> 100 loot / risk), per NPC in the
+  SQLite `drives` table, settling to 0 with a 30-minute half-life (sidecar `memory.GOAL_HALF_LIFE_MS` = game
+  `Dialogue.GOAL_HALF_LIFE_MS`). Shown as "Drive" in the chat window.
 
-### 4) Player2 entegrasyonu
-- Yerel uygulama: `http://localhost:4315/v1/chat/completions` (OpenAI formatı). Oyuncu Player2 uygulamasında giriş yapmış olmalı.
-- Client ID: https://player2.game/profile/developer → istek başlığı `player2-game-key: <client_id>`.
-- `GET /v1/health` her 60 saniyede bir (süre takibi ve gelir paylaşımı için öneriliyor).
-- Cevap süresi (130 cevap, 2026-10-11/12): ortanca 11 s, %95'i 20 s, en yavaşı 32 s; yavaş bir akşam sohbetin ilk cevabı 37 / 43 s. Sidecar 60 s bekler (`dialogue.timeout_s`; eski 30 s %3'ü kesiyordu, config.json'da eski varsayılan 30 kaldıysa 60 kullanılır: `config.OLD_DEFAULTS`), Lua 75 s (`Dialogue.settings.timeoutMs`; Lua sidecar'dan kısa beklerse geç gelen cevap kaybolur, sidecar ise onu konuşma geçmişine yazmış olur).
-- Rate limit hatasını yakala. Ücretsiz ve kredili modeller farklı olabilir, bu yüzden JSON doğrulaması şart.
-- Player2 bazen isteği "user input rejected (HTTP 400)" ile reddeder (içerik filtresi gibi; 2026-10-11'de iki kez, aynı istek tekrar da reddedildi: bir pazarlık açılışı ve sıradan bir konuşma). `Player2Provider` hızlı bir reddi bir kez aynen yeniden dener; o da reddedilirse `Sidecar._ask_llm` kısa prompt'la (başta "Role-play for the zombie survival video game Project Zomboid…", anı/özet ve uzun takas listeleri yok, son 2 satır geçmiş) bir kez daha sorar. Pazarlık kuralları da yumuşatıldı ("tribute/menacing/open fire" yerine "toll/tough/starts the fight"). Pencere nedene göre yazar (`fallback_http_400`, `fallback_timeout`, `fallback_rate_limited`).
-- Uygulamasız seçenek: Web API `https://api.player2.game/v1` (kimlik doğrulama gerekir).
-- TTS ile seslendirme opsiyonel (ses konumsal olmaz).
-- Player2'nin kendi hafıza araçlarını kullanma; hafıza sidecar'da kalır.
+### 4) Player2 integration
+- Local app: `http://localhost:4315/v1/chat/completions` (OpenAI format). The player must be signed in to the Player2
+  app.
+- Client ID: https://player2.game/profile/developer -> request header `player2-game-key: <client_id>`.
+- `GET /v1/health` every 60 seconds (recommended for time tracking and revenue sharing).
+- Reply times (130 replies, 2026-10-11/12): median 11 s, 95% within 20 s, the slowest 32 s; on a slow evening the first
+  reply of a conversation took 37 / 43 s. The sidecar waits 60 s (`dialogue.timeout_s`; the old 30 s cut off 3%; when
+  config.json still holds the old default 30, 60 is used: `config.OLD_DEFAULTS`), Lua 75 s
+  (`Dialogue.settings.timeoutMs`; if Lua waits less than the sidecar, a late reply is lost although the sidecar has
+  written it into the conversation history).
+- Catch rate-limit errors. Free and credit models may differ, so JSON validation is a must.
+- Player2 sometimes refuses a request with "user input rejected (HTTP 400)" (like a content filter; twice on
+  2026-10-11, and the same request was refused again: a parley opening and an ordinary conversation).
+  `Player2Provider` retries a quick refusal once as it is; if that is refused too, `Sidecar._ask_llm` asks once more with
+  a short prompt ("Role-play for the zombie survival video game Project Zomboid..." up front, no memories / summaries
+  and no long trade lists, the last 2 lines of history). The parley rules were softened too ("toll / tough / starts the
+  fight" instead of "tribute / menacing / open fire"). The window says why (`fallback_http_400`, `fallback_timeout`,
+  `fallback_rate_limited`).
+- Without the app: the Web API `https://api.player2.game/v1` (needs authentication).
+- Text-to-speech is optional (the sound is not positional).
+- Do not use Player2's own memory tools; memory stays in the sidecar.
 
 ### 5) RL (`rl/`)
-- Aksiyonlar: A-Life'ın mevcut davranışları (devriye, baskın, bölge tutma, uyarma, soyma, yeniden toplanma…).
-- Gözlem: can/kanama, mermi, yakındaki zombi ve düşman sayısı, oyuncunun silahı çekili mi, saat, fraksiyon ilişkisi + LLM'den gelen trust / fear / goal.
-- Eğitim:
-  1. Oyun loglarından behavior cloning (önce A-Life'ın kendi kararlarını taklit et).
-  2. A-Life'ın ekran dışı squad simülasyonuna benzeyen basit bir Gymnasium ortamında PPO (Stable-Baselines3). CPU yeterli; MlpPolicy için GPU önerilmiyor.
-- trust / fear / goal girdileri eğitimde rastgele verilir → tek policy, yeniden eğitim olmadan diyalogla ayarlanabilir.
-- Ödül: hayatta kalma + görev başarısı, squad kayıplarına ceza.
-- Dışa aktarma: MLP ağırlıkları → Lua tablosu.
-- Uygulandı (4. aşama): `rl/alifebrain_rl/sim.py` (`SquadEnv`; gözlem `features.py` = `Features.lua` şema 1, eylemler
-  iki zincirin A-Life modül id'leri, geçersiz eylem = zincirin `default`'u + küçük ceza; çatışma A-Life
-  `Offline/ALifeOfflineCombat.lua` güç modeli; güven/korku/hedef ödülü değiştirir: korku = oyuncunun tehlikesi, onun
-  gücünü artırır; her yeni tehdit hayatta kalma ağırlığıyla ek bedel, temkinli hedef bu yüzden belaya girmez; oyuncu
-  yerinin çevresinde kalır), `ppo.py` (SB3 PPO, 64-64 tanh;
-  tek gövde iki ağ olarak dışa aktarılır; `--install` moda yazar). `rl/.venv`: numpy + torch CPU + SB3 + Gymnasium.
-  Kalibrasyon hedefi: A-Life benzeri kural (hep savaş, yalnızca çok yaralıyken kaç) bölümlerin ~%30'unda ölür.
-  Sonuç (3M adım, n_steps 1024, batch 512, target_kl 0.02; 2 tohum tutarlı): PPO ölüm %8–14 (kural %38); güven >
-  +0.6 takip %93–95 (< +0.4: %18–43); yalnızken toplama hedef > +0.5 %90–95, < −0.5 %5–11; 4+ zombi ve can < 0.4 →
-  kaç %99. Zayıf kalan: korkulan silahlı oyuncuyu uyarma (ilk seçimde %38–47, bölüm boyunca ~%2; oyunda da nadir:
-  kararların %4'ünde oyuncu 10 karenin içinde). `ppo.py` raporu: probe'lar (ilk seçim) + `HABITS` (bölüm boyunca).
+- Actions: A-Life's existing behaviours (patrol, raid, hold an area, warn, rob, regroup...).
+- Observation: health / bleeding, ammunition, nearby zombies and enemies, whether the player has a weapon drawn, time of
+  day, faction relation + trust / fear / goal from the LLM.
+- Training:
+  1. Behaviour cloning from game logs (first imitate A-Life's own decisions).
+  2. PPO (Stable-Baselines3) in a simple Gymnasium environment like A-Life's off-screen squad simulation. A CPU is
+     enough; a GPU is not recommended for MlpPolicy.
+- trust / fear / goal inputs are randomized during training -> one policy that dialogue can steer without retraining.
+- Reward: survival + mission success, a penalty for squad losses.
+- Export: MLP weights -> a Lua table.
+- Implemented (phase 4): `rl/alifebrain_rl/sim.py` (`SquadEnv`; observation `features.py` = `Features.lua` schema 1,
+  actions are the A-Life module ids of the two chains, an invalid action = the chain's `default` + a small penalty;
+  combat uses A-Life's `Offline/ALifeOfflineCombat.lua` power model; trust / fear / goal change the reward: fear = how
+  dangerous the player is, it raises their power; every new threat costs extra by the survival weight, so a careful goal
+  stays out of trouble; the player stays around their spot), `ppo.py` (SB3 PPO, 64-64 tanh; one body exported as two
+  nets; `--install` writes into the mod). `rl/.venv`: numpy + CPU torch + SB3 + Gymnasium. Calibration target: an
+  A-Life-like rule (always fight, flee only when badly hurt) dies in ~30% of episodes. Result (3M steps, n_steps 1024,
+  batch 512, target_kl 0.02; 2 seeds agree): PPO death rate 8-14% (rule 38%); trust > +0.6 follows 93-95% (< +0.4:
+  18-43%); gathering alone with goal > +0.5 90-95%, < -0.5 5-11%; 4+ zombies and health < 0.4 -> flee 99%. Still weak:
+  warning a feared armed player (first choice 38-47%, ~2% over the episode; rare in game too: the player is within
+  10 tiles in 4% of decisions). `ppo.py` report: probes (first choice) + `HABITS` (over the episode).
 
-## Yol haritası
+## Roadmap
 
-1. Loglama + dosya köprüsü: Lua ⇄ Python arasında uçtan uca ping/pong.
-2. LLM diyalog + hafıza (Player2 ile). İlk görünür sonuç.
-3. Behavior cloning.
-4. PPO (Gymnasium simülasyonu).
-5. LLM çıktılarını policy girdisine bağlama (uygulandı: `goal_delta`, `moods`, `Control.lua`; oyunda denenecek).
+1. Logging + file bridge: end-to-end ping/pong between Lua and Python.
+2. LLM dialogue + memory (with Player2). The first visible result.
+3. Behaviour cloning.
+4. PPO (Gymnasium simulation).
+5. Feed the LLM outputs into the policy (implemented: `goal_delta`, `moods`, `Control.lua`; to be tried in game).
 
-## İlk iş
+## First steps
 
-- A-Life'ın Lua kodunu incele: karar/durum fonksiyonları, konuşma/uyarı fonksiyonları, NPC kimliği ve modData alanları, squad yapısı.
-- A-Life dosyaları Steam workshop klasöründe: `steamapps/workshop/content/108600/3803984183`. Erişilemiyorsa kullanıcıdan Claude Code'u `--add-dir` ile bu klasörü ekleyerek başlatmasını iste.
-- Bulguları `docs/alife-hooks.md` dosyasına yaz, sonra 1. aşamaya geç.
+- Study A-Life's Lua code: decision / state functions, talk / warning functions, NPC identity and modData fields,
+  squad structure.
+- A-Life's files are in the Steam workshop folder: `steamapps/workshop/content/108600/3803984183`. If it cannot be
+  reached, ask the user to start Claude Code with this folder added through `--add-dir`.
+- Write the findings into `docs/alife-hooks.md`, then move on to phase 1.
 
-## Ortam
+## Environment
 
-- Project Zomboid Build 42.20+ (stable), A-Life v1.3.x (B42.21 destekli).
-- Doğrulandı (2026-10-08): Windows 11, PZ 42.21.0, A-Life v1.3.15.
-- A-Life bu makinede Steam workshop'ta **değil**, elle kurulu: `C:\Users\ERDEM\Zomboid\mods\ProjectALifeNPCs\42.20\`.
-- Oyunla gelen Java: `C:\Program Files (x86)\Steam\steamapps\common\ProjectZomboid\jre64\bin\java.exe` (Kahlua testleri için).
-- A-Life inceleme notları: `docs/alife-hooks.md`.
+- Project Zomboid Build 42.20+ (stable), A-Life v1.3.x (supports B42.21).
+- Verified (2026-10-08): Windows 11, PZ 42.21.0, A-Life v1.3.15.
+- On this machine A-Life is **not** in the Steam workshop but installed by hand:
+  `C:\Users\ERDEM\Zomboid\mods\ProjectALifeNPCs\42.20\`.
+- The Java that ships with the game: `C:\Program Files (x86)\Steam\steamapps\common\ProjectZomboid\jre64\bin\java.exe`
+  (for Kahlua tests).
+- A-Life study notes: `docs/alife-hooks.md`.
 
-## Referanslar
+## References
 
-- A-Life Workshop sayfası: https://steamcommunity.com/sharedfiles/filedetails/?id=3803984183
-- PZ modding API notları: https://github.com/FWolfe/Zomboid-Modding-Guide/blob/master/api/README.md
+- A-Life Workshop page: https://steamcommunity.com/sharedfiles/filedetails/?id=3803984183
+- PZ modding API notes: https://github.com/FWolfe/Zomboid-Modding-Guide/blob/master/api/README.md
 - PZ JavaDocs (LuaFileWriter): https://demiurgequantified.github.io/ProjectZomboidJavaDocs/
-- ZombieBuddy (Java mod alternatifi; dağıtım için önerilmiyor): https://github.com/zed-0xff/ZombieBuddy
+- ZombieBuddy (a Java mod alternative; not recommended for distribution): https://github.com/zed-0xff/ZombieBuddy
 - Player2: https://player2.game
-- Player2 Python istemcisi: https://pypi.org/project/player2py/
-- Player2 Godot eklentisi (API kullanım örnekleri): https://github.com/elefant-ai/player2-ai-npc-godot
+- Player2 Python client: https://pypi.org/project/player2py/
+- Player2 Godot plugin (API usage examples): https://github.com/elefant-ai/player2-ai-npc-godot
 - Stable-Baselines3 PPO: https://stable-baselines3.readthedocs.io

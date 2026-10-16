@@ -1,5 +1,7 @@
--- UI strings in English and Turkish. Picks the game's language when it is one of these,
--- English otherwise. ALifeBrain.Text.forced = "TR" overrides (debug console).
+-- UI strings. The interface is English only (user request, 2026-10-16: it had a Turkish
+-- translation too). Text.language() is still the game's language code: the LLM gets it, so an
+-- NPC that speaks first (a parley) does so in the player's language; the NPCs always answer in
+-- the language the player writes in. ALifeBrain.Text.forced = "TR" overrides it (debug console).
 
 ALifeBrain = ALifeBrain or {}
 
@@ -95,94 +97,6 @@ Text.strings = {
         parley_got_away = "You got away from {name}.",
         parley_gone = "{name} is gone.",
     },
-    TR = {
-        title = "A-LIFE BRAIN  /  SOHBET",
-        menu_talk = "A-Life Brain: {name} ile konuş",
-        menu_offline = "A-Life Brain: sidecar çalışmıyor",
-        menu_offline_tip = "sidecar\\run-sidecar.cmd dosyasını başlatıp tekrar dene.",
-        survivor = "Hayatta kalan",
-        you = "Sen",
-        send = "Gönder",
-        leave = "Ayrıl",
-        leave_full = "[Ayrıl]  Sonra görüşürüz.",
-        thinking = "{name} düşünüyor",
-        earlier = "önceki konuşmalar",
-        mood = "Güven {trust}   Korku {fear}   Atılganlık {goal}",
-        option_control = "NPC davranışını eğitilmiş policy seçsin",
-        option_pause = "Konuşurken oyunu duraklat",
-        option_pause_tip = "Tek oyunculu: sohbet penceresi açıkken oyun durur, ölüler ve çatışmalar bekler. Pencere kapanınca eski hızında devam eder. Oyun duraklatılmışken envanter tuşu çalışmaz: takas yapacaksan envanteri konuşmadan önce aç.",
-        paused_header = "OYUN DURAKLATILDI",
-        option_keep = "Tanıştığın NPC'ler kalsın (hiç silinmesin)",
-        option_keep_tip = "Sana 10 kare yaklaşan bir NPC ekibiyle birlikte kalıcı olur: A-Life onu kayda yazar ve uzaklaşsan bile ziyaret edilmeyen NPC diye silmez. Kapalı: yalnızca yeni tanışılanlar kalıcı olmaz. A-Life bu tür gruplardan en çok \"Saved group limit\" sandbox ayarı kadarını (varsayılan 20) kaydeder.",
-        keep_cap = "A-Life Brain: {groups} grup kalıcı, A-Life {cap} tanesini kaydediyor. A-Life sandbox ayarlarında \"Saved group limit\" değerini yükselt.",
-        option_control_tip = "Kapalı: A-Life tek başına karar verir (policy yalnızca izler). Açık: RL policy, konuşmaların bıraktığı güven, korku ve atılganlıkla A-Life'ın kendi davranışları arasından seçer. Oyuncu emirleri, konuşmalar, soygunlar ve oyuncuyla çatışmalar her zaman A-Life'ta kalır.",
-        stance_friendly = "Dost", stance_neutral = "Tarafsız", stance_careful = "Temkinli", stance_hostile = "Düşman",
-        stance_trusted = "Sana güveniyor",
-        rapport_granted = "{name} artık sana güveniyor: grubu yaklaşmana izin veriyor.",
-        rapport_withdrawn = "{name} artık sana güvenmiyor: grubu yine uzak durmanı istiyor.",
-        offline = "A-Life Brain sidecar'ına bağlantı yok.",
-        unavailable = "Sidecar'da hazır bir yapay zekâ sağlayıcısı yok.",
-        busy = "{name} hâlâ cevap veriyor.",
-        combat = "{name} çatışmada. Sonra konuş.",
-        hostile = "{name} sana düşman, konuşmuyor.",
-        fallback = "Yapay zekâdan cevap gelmedi ({reason}); A-Life kendi cevabını verdi.",
-        fallback_http_400 = "Yapay zekâ bu cümleye cevap vermedi. Başka türlü söylemeyi dene; A-Life kendi cevabını verdi.",
-        fallback_timeout = "Yapay zekâ çok geç kaldı; tekrar söyle. A-Life kendi cevabını verdi.",
-        fallback_rate_limited = "Yapay zekâ şu an meşgul, biraz bekle. A-Life kendi cevabını verdi.",
-        closed_far = "{name} çok uzakta. Konuşma bitti.",
-        closed_gone = "{name} artık konuşamıyor. Konuşma bitti.",
-        item_water = "su", item_food = "yiyecek", item_medicine = "ilaç",
-        gave = "{name} sana verdi: {item} (envanterine eklendi)",
-        give_no_item = "{name}: verecek {item} yok.",
-        give_too_far = "Bir şey vermek için çok uzaktasın.",
-        give_limit = "{name} şimdilik yeterince verdi.",
-        give_refused = "{name} veremedi.",
-        give_combat = "{name} şu an çatışmanın ortasında. Bitince tekrar dene.",
-        follow_ok = "{name} {minutes} dakika boyunca seni takip edecek.",
-        follow_low_trust = "{name} seni takip edecek kadar güvenmiyor.",
-        follow_refused = "{name} şu an seni takip edemiyor.",
-        stay_ok = "{name} burada bekliyor.",
-        stay_refused = "{name} şu an burada bekleyemiyor.",
-        left = "{name} konuşmayı bitirdi.",
-        trade_title = "TAKAS",
-        trade_yours = "Senin teklifin (eşyaları buraya sürükle)",
-        trade_theirs = "{name} (istediğine tıkla, sağ tık azaltır)",
-        trade_propose = "Teklif et",
-        trade_accept = "Kabul et",
-        trade_clear = "Temizle",
-        trade_default_text = "Bu takasa ne dersin?",
-        trade_counter = "{name} bunun yerine şunu öneriyor: {items}. Kabul etmek için 'Kabul et'e bas.",
-        trade_more = "{name} bunun için daha fazlasını istiyor.",
-        trade_rejected = "{name} takası reddetti.",
-        trade_done = "Takas tamam: {given} aldın, {received} verdin.",
-        trade_got = "{name} sana verdi: {given} (envanterine eklendi)",
-        trade_gift = "{name} hediyeni kabul etti: {received}.",
-        trade_changed = "Takas olmadı: masadaki eşyalar değişti.",
-        trade_too_far = "Takas için çok uzaktasın.",
-        trade_refused = "{name} şu an takas yapamıyor.",
-        trade_combat = "{name} şu an çatışmanın ortasında. Bitince tekrar dene.",
-        trade_empty = "Takas masası boş.",
-        trade_not_yours = "Yalnızca kendi envanterindeki eşyaları teklif edebilirsin.",
-        trade_equipped = "Önce çıkar: giyilen, elde tutulan ya da takılı eşyalar takas edilemez.",
-        trade_full = "Masaya her taraftan en fazla 10 eşya konabilir.",
-        trade_not_empty = "Önce boşalt: içinde eşya olan çantalar takas edilemez.",
-        trade_favorite = "Favori eşyalar takas edilemez; önce favoriden çıkar.",
-        trade_pruned = "Masadan kaldırıldı: artık envanterinde değil ya da kullanımda.",
-        trade_deal = "{name} öneriyor: {items} karşılığında senin {wants}. İkisi de masada; 'Kabul et' deyince aynı anda değişilir.",
-        trade_wants_only = "{name} senden {wants} istiyor. Masada; 'Kabul et' deyince verilir.",
-        trade_counter_unpaid = "{name} masaya {items} koydu ama karşılığında bir şey istiyor: koy ve 'Teklif et'e bas.",
-        trade_wants_missing = "Sende yok: {wants}.",
-        trade_unpaid = "{name} karşılığında bir şey istiyor: masaya bir şey koy ve yeniden teklif et.",
-        trade_open_window = "{name} takas öneriyor: {items}. Takas için sohbet penceresini aç.",
-        trade_wanted_tag = "istenen",
-        trade_nothing = "{name}: takas edecek bir şey yok.",
-        parley_start = "{name} seni nişan almış. Konuşarak kurtul, haraç ver (vermek için yanına yürü) ya da savaş. Bu pencereyi kapatırsan çatışma başlar.",
-        parley_fight = "{name} ateş açıyor!",
-        parley_paid = "{name} haracı aldı, gitmene izin veriyor.",
-        parley_sent_away = "{name} gitmene izin veriyor. Hemen uzaklaş.",
-        parley_got_away = "{name} elinden kurtuldun.",
-        parley_gone = "{name} ortadan kayboldu.",
-    },
 }
 
 local function join(names)
@@ -191,6 +105,7 @@ local function join(names)
     return table.concat(out, ", ")
 end
 
+-- The game's language code ("EN", "TR", "DE" ...), for the LLM.
 function Text.language()
     if Text.forced ~= nil then return Text.forced end
     if Text.cached ~= nil then return Text.cached end
@@ -198,9 +113,9 @@ function Text.language()
     pcall(function()
         local language = Translator.getLanguage()
         local name = language ~= nil and type(language.name) == "function" and language:name() or tostring(language)
-        if name ~= nil then code = string.upper(tostring(name)) end
+        if name ~= nil and tostring(name) ~= "" then code = string.upper(tostring(name)) end
     end)
-    Text.cached = Text.strings[code] ~= nil and code or "EN"
+    Text.cached = code
     return Text.cached
 end
 
@@ -210,8 +125,7 @@ function Text.has(key)
 end
 
 function Text.get(key, vars)
-    local strings = Text.strings[Text.language()] or Text.strings.EN
-    local template = strings[key] or Text.strings.EN[key] or key
+    local template = Text.strings.EN[key] or key
     return (string.gsub(template, "{(%w+)}", function(name)
         local value = type(vars) == "table" and vars[name] or nil
         return value ~= nil and tostring(value) or ""

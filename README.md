@@ -1,261 +1,282 @@
 # A-Life Brain
 
-Project A-Life NPC'lerine LLM diyalog + hafıza ve RL karar katmanı ekleyen Project Zomboid (B42) eklentisi.
-Tasarım: [CLAUDE.md](CLAUDE.md) · A-Life kanca notları: [docs/alife-hooks.md](docs/alife-hooks.md) ·
-Köprü protokolü: [docs/bridge-protocol.md](docs/bridge-protocol.md)
+A Project Zomboid (B42) add-on that gives Project A-Life's NPCs LLM dialogue + memory and an RL decision layer.
+Design: [CLAUDE.md](CLAUDE.md) · A-Life hook notes: [docs/alife-hooks.md](docs/alife-hooks.md) ·
+Bridge protocol: [docs/bridge-protocol.md](docs/bridge-protocol.md)
 
-## Klasörler
+## Folders
 
 ```
-mod/                      Zomboid/Workshop/ALifeBrain düzeni (workshop.txt + Contents/mods/ALifeBrain)
+mod/                      Zomboid/Workshop/ALifeBrain layout (workshop.txt + Contents/mods/ALifeBrain)
   Contents/mods/ALifeBrain/
-    common/               B42'nin istediği sürümden bağımsız klasör
+    common/               the version-independent folder B42 expects
     42/mod.info           require=\ProjectALifeNPCs
-    42/media/lua/shared/ALifeBrain/   Json, Bridge, ALifeBrainHooks (A-Life'a dokunan her şey), Dialogue, Trade,
-                                      Text, Features + Policy + DecisionLog (3. aşama), PolicyWeights (üretilir),
-                                      Moods + Control (5. aşama), Companion, Standoff, Parley, Tests/
-    42/media/lua/client/ALifeBrain/   ALifeBrainMain (başlatma, ping), EventLog, ChatWindow
-sidecar/                  Python sidecar (yalnızca standart kütüphane)
-rl/                       Policy eğitimi (rl/.venv): davranış klonlama (numpy), PPO (torch, SB3), Lua'ya dışa aktarma
-tests/lua/run_tests.lua   Lua testlerini standart Lua 5.1 / LuaJIT ile koşar
-tests/lua/run_tests.py    aynısı Python'dan, oyun olmadan (lupa: rl\.venv\Scripts\python -m pip install lupa;
-                          rl\.venv\Scripts\python tests\lua\run_tests.py). Kahlua birebir aynı değil; son söz oyunda
-                          -debug ile çalışan testler
+    42/media/lua/shared/ALifeBrain/   Json, Bridge, ALifeBrainHooks (everything that touches A-Life), Dialogue, Trade,
+                                      Text, Features + Policy + DecisionLog (phase 3), PolicyWeights (generated),
+                                      Moods + Control (phase 5), Keeper, Pause, Rapport, Robberies, Companion,
+                                      Standoff, Parley, Tests/
+    42/media/lua/client/ALifeBrain/   ALifeBrainMain (startup, ping), EventLog, ChatWindow
+sidecar/                  Python sidecar (standard library only)
+rl/                       Policy training (rl/.venv): behaviour cloning (numpy), PPO (torch, SB3), export to Lua
+release/                  make_release.py (the player zip), INSTALL.txt, release notes
+tests/lua/run_tests.lua   runs the Lua tests with standard Lua 5.1 / LuaJIT
+tests/lua/run_tests.py    the same from Python, without the game (lupa: rl\.venv\Scripts\python -m pip install lupa;
+                          rl\.venv\Scripts\python tests\lua\run_tests.py). Kahlua is not exactly the same; the tests
+                          that run in game with -debug have the last word
 ```
 
-## Güvenlik kuralları
+## Safety rules
 
-- `Zomboid/mods` içindeki modlara ve `Zomboid/Saves` içindeki kayıtlara dokunulmaz.
-- Mod, oyuna yalnızca `Zomboid/Workshop/ALifeBrain` bağlantısı (junction) ile gösterilir.
-- Mod ve sidecar `Zomboid/Lua` içinde yalnızca `alifebrain_*` dosyalarını oluşturur.
-- Denemeler **yeni bir test kaydında** yapılır; mevcut kayıtlara mod eklenmez.
+- The mods in `Zomboid/mods` and the saves in `Zomboid/Saves` are never touched.
+- The mod is shown to the game only through the `Zomboid/Workshop/ALifeBrain` link (junction).
+- The mod and the sidecar create only `alifebrain_*` files in `Zomboid/Lua`.
+- Trials happen in a **new test save**; the mod is not added to existing saves.
 
 ## Sidecar
 
-`sidecar\run-sidecar.cmd` dosyasına çift tıkla, ya da:
+Double-click `sidecar\run-sidecar.cmd`, or:
 
 ```bash
 cd sidecar
 python -m alifebrain_sidecar --verbose
 ```
 
-Oyunsuz duman testi (geçici bir klasörle, `Zomboid\Lua`'ya dokunmaz): sidecar'ı `--lua-dir <geçici klasör>` ile
-başlatıp `python tools/fake_game.py --lua-dir <geçici klasör>` çalıştır; sonunda `SMOKE OK` yazmalı.
+Smoke test without the game (with a temporary folder, `Zomboid\Lua` is not touched): start the sidecar with
+`--lua-dir <temp folder>` and run `python tools/fake_game.py --lua-dir <temp folder>`; it should end with `SMOKE OK`.
 
-Varsayılanlar: Lua klasörü `%USERPROFILE%\Zomboid\Lua`, veri klasörü `%LOCALAPPDATA%\ALifeBrain`
-(`events.jsonl`, `sidecar.lock`). Testler:
+Defaults: Lua folder `%USERPROFILE%\Zomboid\Lua`, data folder `%LOCALAPPDATA%\ALifeBrain` (`events.jsonl`,
+`sidecar.lock`). Tests:
 
 ```bash
 cd sidecar
 python -m unittest discover -v tests
 ```
 
-## Tek dosya sidecar (Python'suz)
+## Single-file sidecar (no Python)
 
 ```bash
 sidecar\build-exe.cmd
 ```
 
-İlk çalıştırmada `sidecar\.venv-build` oluşturur ve PyInstaller'ı kurar; sonucu `sidecar\dist\ALifeBrainSidecar.exe`
-(yaklaşık 9 MB). Exe her yere kopyalanabilir ve Python istemez; çift tıklamak `run-sidecar.cmd` ile aynıdır, aynı
-argümanları alır (`ALifeBrainSidecar.exe --provider fake`, `--verbose`). Ayarlar ve hafıza yine
-`%LOCALAPPDATA%\ALifeBrain\` altındadır. İmzasız exe olduğu için Windows SmartScreen ya da antivirüs ilk açılışta
-uyarabilir. Betik yalnızca derler, sidecar'ı başlatmaz; sonunda sonucu yazıp bir tuşa basmanı bekler (betiklerden
-çağırırken `build-exe.cmd nopause`).
+The first run creates `sidecar\.venv-build` and installs PyInstaller; the result is `sidecar\dist\ALifeBrainSidecar.exe`
+(about 9 MB). The exe can be copied anywhere and needs no Python; a double click is the same as `run-sidecar.cmd`, and
+it takes the same arguments (`ALifeBrainSidecar.exe --provider fake`, `--verbose`). Settings and memory are still under
+`%LOCALAPPDATA%\ALifeBrain\`. The exe is not signed, so Windows SmartScreen or an antivirus may warn the first time.
+The script only builds, it does not start the sidecar; at the end it shows the result and waits for a key (call
+`build-exe.cmd nopause` from scripts).
 
-## Oyunda deneme (1. aşama: ping/pong)
+## Release zip
 
-1. Modu Workshop klasörüne bağla (bir kez; `Zomboid/mods`'a dokunmaz):
+```bash
+python release/make_release.py
+```
+
+Builds `dist\ALifeBrain-<version>.zip` (the version comes from `mod.info`): the mod folder (files git tracks), the exe
+and `release\INSTALL.txt`. It refuses an exe older than the sidecar's sources (run `build-exe.cmd` first), warns about
+uncommitted changes, and refuses any file that holds this machine's Player2 client id.
+
+## Trying it in game (phase 1: ping/pong)
+
+1. Link the mod into the Workshop folder (once; `Zomboid/mods` is not touched):
    `New-Item -ItemType Junction -Path "$env:USERPROFILE\Zomboid\Workshop\ALifeBrain" -Target "<repo>\mod"`
-2. Sidecar'ı başlat.
-3. Oyunu `-debug` ile aç (Steam → Özellikler → Başlatma seçenekleri), **yeni** bir oyun oluştur, mod listesinde
-   Project A-Life ve A-Life Brain'i aç.
-4. `Zomboid/console.txt` içinde beklenenler:
+2. Start the sidecar.
+3. Start the game with `-debug` (Steam -> Properties -> Launch options), create a **new** game, and enable
+   Project A-Life and A-Life Brain in the mod list.
+4. Expected in `Zomboid/console.txt`:
    - `[ALifeBrain] [test] N passed, 0 failed (Kahlua wide chars)`
    - `[ALifeBrain] A-Life 1.3.15 ...: touchpoints ok=19 missing=0`
    - `[ALifeBrain] sidecar online ...`, `sidecar ready ...`, `pong #1 rtt=...ms`
-5. Bir A-Life NPC'sine vur → sidecar logunda `event npc_hit ...`, `events.jsonl`'de kayıt.
-6. Sidecar'ı kapat → birkaç saniye içinde `sidecar offline`; oyun normal devam eder.
+5. Hit an A-Life NPC -> `event npc_hit ...` in the sidecar log and a record in `events.jsonl`.
+6. Close the sidecar -> `sidecar offline` within a few seconds; the game goes on as normal.
 
-Debug konsolunda: `ALifeBrain.status()`, `ALifeBrain.ping()`, `ALifeBrain.runTests()`,
-`ALifeBrain.spawnTestNpc()` (6 kare doğuna 1 dost NPC, Church Volunteers; A-Life diagnostics'ini açar),
-`ALifeBrain.spawnTestNpc("alife_hobbs", 3)` (başka fraksiyon / sayı), `ALifeBrain.npcs()` (A-Life'ın NPC kaydı:
-en yakından uzağa durum, kalıcı mı, uzaklık; bu yüklemeden beri silinenler ve nedenleri), `ALifeBrain.trust()`
-(ruh halini bildiğimiz NPC'lerin güveni, korkusu ve sana karşı tutumu).
+In the debug console: `ALifeBrain.status()`, `ALifeBrain.ping()`, `ALifeBrain.runTests()`,
+`ALifeBrain.spawnTestNpc()` (one friendly NPC 6 tiles east, Church Volunteers; turns on A-Life's diagnostics),
+`ALifeBrain.spawnTestNpc("alife_hobbs", 3)` (another faction / count), `ALifeBrain.npcs()` (A-Life's NPC registry:
+state from nearest to farthest, kept or not, distance; deletions since this load and why), `ALifeBrain.trust()` (trust,
+fear and stance toward you of the NPCs whose mood we know).
 
-**Tanıştığın NPC'ler kalır** (varsayılan açık; Mod Options → A-Life Brain → "Tanıştığın NPC'ler kalsın"): sana 10 kare
-yaklaşan her A-Life NPC'si ekibiyle birlikte kalıcı olur; A-Life onu kayda yazar ve sonra uzaklaşsan bile silmez.
-A-Life kendi başına yalnızca kalıcı grupları (karakollar, kalıcı karşılaşmalar, kendi offline ekipleri) kaydeder; gerisi
-tek oturumluktur. A-Life bu tür gruplardan en çok sandbox ayarı "Saved group limit" kadarını (varsayılan 20)
-kaydeder; tutulan gruplar bunu aşarsa oyunda bir uyarı çıkar, ayarı yükselt (en çok 500). Geri almak için önce kutuyu
-kapat, sonra konsolda `ALifeBrain.releaseKept()`.
+**The NPCs you meet stay** (on by default; Mod Options -> A-Life Brain -> "Keep NPCs you meet"): every A-Life NPC that
+comes within 10 tiles of you is kept together with its crew; A-Life writes it into the save and does not delete it,
+even after you walk away. On its own A-Life saves only persistent groups (outposts, persistent encounters, its own
+offline squads); the rest live for one session. A-Life saves at most its sandbox option "Saved group limit" (default 20)
+of such groups; if the kept groups go past it, a warning shows in game: raise the option (up to 500). To undo it, turn
+the box off first, then run `ALifeBrain.releaseKept()` in the console.
 
-`spawnTestNpc` NPC'leri kalıcı çağırır. A-Life'ın debug spawner'ı varsayılan olarak **harcanabilir** NPC üretir:
-oyuncu uzaktayken "uyur" (dormant), kimse yaklaşmadan A-Life sandbox ayarı "Unvisited NPC lifetime" (varsayılan 8
-oyun saati) dolunca silinir. Eski davranış için 4. argüman `true` (`spawnTestNpc(nil, 1, nil, true)`).
+`spawnTestNpc` spawns kept NPCs. A-Life's debug spawner makes **expendable** NPCs by default: while the player is far
+away they "sleep" (dormant), and when nobody comes near before A-Life's sandbox option "Unvisited NPC lifetime"
+(default 8 game hours) runs out, they are deleted. For the old behaviour pass `true` as the 4th argument
+(`spawnTestNpc(nil, 1, nil, true)`).
 
-## LLM diyalog (2. aşama)
+## LLM dialogue (phase 2)
 
-Ayarlar: `%LOCALAPPDATA%\ALifeBrain\config.json` (ilk çalıştırmada varsayılanlarla oluşur).
+Settings: `%LOCALAPPDATA%\ALifeBrain\config.json` (created with the defaults on the first run).
 
-- `provider`: `player2` (varsayılan), `ollama`, `openai` veya `fake` (LLM yok, test cevabı).
-- Player2: uygulamayı kur, giriş yap; https://player2.game/profile/developer sayfasından Client ID al ve
-  `player2.client_id` alanına yaz (veya `ALIFEBRAIN_PLAYER2_CLIENT_ID` ortam değişkeni).
-- OpenAI uyumlu servis: anahtar yalnızca `openai.api_key_env` alanında adı geçen ortam değişkeninden okunur;
-  dosyaya anahtar yazılmaz.
-- Hafıza: `%LOCALAPPDATA%\ALifeBrain\memory.sqlite3` (NPC'ler, anılar, konuşmalar, güven/korku, atılganlık).
-  Eski anılar özetlenir: bir NPC'nin (ya da ekibinin, fraksiyonunun) anısı 14'ü geçince en yeni 6'sı dışındakiler
-  LLM'le kısa bir özete yazılır (sidecar boştayken, en çok dakikada bir; her özet bir LLM çağrısı). Asıllar silinmez.
-  Kapatmak için `config.json`: `"memory": {"summarize": false}`.
+- `provider`: `player2` (default), `ollama`, `openai` or `fake` (no LLM, a test answer).
+- Player2: install the app and sign in; get a Client ID at https://player2.game/profile/developer and write it into
+  `player2.client_id` (or the `ALIFEBRAIN_PLAYER2_CLIENT_ID` environment variable).
+- An OpenAI-compatible service: the key is read only from the environment variable named in `openai.api_key_env`; no
+  key is written into the file.
+- Memory: `%LOCALAPPDATA%\ALifeBrain\memory.sqlite3` (NPCs, memories, conversations, trust / fear, drive). Old memories
+  are summarized: once an NPC (or its crew, or its faction) has more than 14 memories, all but the newest 6 are
+  rewritten by the LLM into a short summary (while the sidecar is idle, at most once a minute; every summary is one LLM
+  call). The originals are not deleted. To turn it off, in `config.json`: `"memory": {"summarize": false}`.
 
-Sohbet penceresi açıkken oyun duraklar (tek oyunculu; Mod Options → A-Life Brain → "Konuşurken oyunu duraklat"),
-kapanınca eski hızında devam eder. Duraklatılmışken envanter tuşu çalışmaz: takas yapacaksan envanteri önce aç.
-Çok oyunculu oyunda oyun duraklatılamadığı için çok oyunculu desteği şimdilik ertelendi.
+The game pauses while the conversation window is open (single player; Mod Options -> A-Life Brain -> "Pause the game
+while talking") and goes on at its old speed when the window closes. The inventory key does not work while the game is
+paused: open the inventory first if you want to trade. A multiplayer game cannot be paused, so multiplayer support is
+postponed for now.
 
-Oyunda: sidecar'ı başlat (LLM'siz denemek için `run-sidecar-fake.cmd`), dost bir NPC çağır ve yanında `T`'ye
-bas (ya da yere sağ tık → en üstte **A-Life Brain: <ad> ile konuş**). Sohbet penceresi açılır: A-Life'ın
-konuşma penceresine benzer (portre, ad, fraksiyon, tutum, güven/korku); önceki konuşmalar üstte, yenileri
-altta. Yaz ve Enter'a bas; NPC durur, "..." gösterir ve cevap verir. Yakında konuşulabilir NPC yoksa ya da
-sidecar kapalıysa `T` A-Life'ın kendi kutusunu açar.
+In game: start the sidecar (`run-sidecar-fake.cmd` to try it without an LLM), spawn a friendly NPC and press `T` next
+to it (or right-click the ground -> at the top, **A-Life Brain: talk to <name>**). The conversation window opens: it
+looks like A-Life's talk window (portrait, name, faction, stance, trust / fear); earlier conversations at the top, new
+ones below. Type and press Enter; the NPC stops, shows "..." and answers. When no talkable NPC is near, or the sidecar
+is off, `T` opens A-Life's own box.
 
-NPC'nin söyledikleri gerçek eylemlere bağlıdır: su / yiyecek / ilaç verebilir (gerçekten envanterinde varsa),
-seni 10 dakika takip edebilir, bekleyebilir ya da konuşmayı bitirebilir; pencerede ne olduğu gri satırla yazar.
-Takip eden NPC yanında kalır: senden 8 kareden uzak zombileri kovalamaz, kalabalık gelince (yakın dövüşte 3, silahla
-6 zombi) ya da ağır yaralıyken geri çekilir; sana yakın tek tük zombilerle A-Life'ın kendi dövüşüyle savaşır.
-Debug konsolunda `ALifeBrain.status()` içindeki `companion` kaç kez geri döndüğünü / çekildiğini gösterir.
-Sen eğilerek ilerlerken takipçi de eğilir, yavaşlar ve koşmaz; ona ya da sana 3 kareden yakın olmayan zombilere
-saldırmaz.
+The window is in English. The NPCs answer in the language you write in: Turkish and English both work (and other
+languages the LLM speaks). An NPC that speaks first (a parley) uses the game's language.
 
-**NPC'ler arası uyarı:** birbirine düşman iki NPC görür görmez ateş etmez: önce "uzak dur", yaklaşırsa ya da uzun
-süre kalırsa son uyarı, sonra çatışma (A-Life'ın fraksiyon replikleriyle). Takipçin uyarılırsa senin yanına çekilir.
+What an NPC says is tied to real actions: it can hand over water / food / medicine (only if it really has some), follow
+you for 10 minutes, wait, or end the conversation; the window writes what happened in a grey line. A follower stays by
+your side: it does not chase zombies more than 8 tiles from you, falls back when a crowd comes (3 zombies in melee,
+6 with a gun) or when badly hurt, and fights the odd zombie near you with A-Life's own combat. `companion` in
+`ALifeBrain.status()` in the debug console shows how often it came back / fell back. When you move crouched, the
+follower crouches too, slows down and does not run; it does not attack zombies that are not within 3 tiles of it or of
+you.
 
-**Pazarlık (düşman NPC'ler):** sidecar açıkken seni gören düşman bir NPC ateş etmek yerine durur, seslenir ve sohbet
-penceresi kendiliğinden açılır; NPC önce konuşur (haraç ister ya da tehdit eder). Konuşurken ekibi ateş etmez.
-Haracı takas masasından verirsen (yanına yürüyüp "Kabul et") ya da seni gönderirse bir süre rahat bırakılırsın.
-Pencereyi kapatırsan, ekipten birine vurursan, 45 saniye susarsan ya da NPC vazgeçerse çatışma başlar; çok
-uzaklaşırsan pazarlık biter. Doğrudan saldırdığın, uyarılarını dinlemediğin, son iki dakikada vurduğun ya da kendi
-soygun sistemiyle seni soyan ekipler A-Life gibi davranır. Fraksiyonunun başka bir grubuyla kavga ettiğin için düşman
-olan ekip ise önce konuşur; öfkelidir ve hemen saldırmaya da karar verebilir. Seni fark edip göremeyen NPC birkaç
-saniye görmeyi bekler. `ALifeBrain.status()` içinde `parley` ve `standoff` sayaçları var.
-Sahte sağlayıcıda anahtar kelimeler: "su" / "water", "yemek" / "food", "takip" / "follow", "bekle" / "wait",
+**Warnings between NPCs:** two NPCs hostile to each other do not open fire on sight: first "keep away", a last warning
+if the other comes closer or stays long, then a fight (with A-Life's faction lines). A follower that is warned falls
+back to you.
+
+**Parley (hostile NPCs):** while the sidecar runs, a hostile NPC that sees you stops instead of shooting, calls out, and
+the conversation window opens by itself; the NPC speaks first (asks for a toll or threatens). While you talk, its crew
+holds fire. Pay the toll through the trade table (walk up to it and press "Accept") or be sent away, and you are left
+alone for a while. Close the window, hit one of the crew, stay silent for 45 seconds, or have the NPC give up, and the
+fight starts; get far away and the parley is over. Crews you attacked directly, whose warnings you ignored, that you
+hit in the last two minutes, or that rob you through A-Life's own robbery system act like A-Life. A crew that is hostile
+because you fought another group of its faction talks first; it is angry and may decide to attack at once. An NPC that
+notices you but cannot see you waits a few seconds to see you. `ALifeBrain.status()` has `parley` and `standoff`
+counters. Keywords of the fake provider: "su" / "water", "yemek" / "food", "takip" / "follow", "bekle" / "wait",
 "hoşça kal" / "bye".
 
-**Takas:** pencerenin sağındaki takas bölümüne envanterinden (vanilla ya da Inventory Tetris) eşya sürükle; NPC'nin
-eşyalarından istediğine tıkla (sağ tık azaltır). "Teklif et" mesajınla birlikte takası NPC'ye sunar; NPC kabul eder
-(değişim anında olur), reddeder ya da kendi eşyalarıyla karşı teklif yapar ve karşılığında ne istediğini söyler
-(istediği eşyaların masaya kendiliğinden konur; "Kabul et" ile alırsın). Veresiye yoktur: NPC'nin eşyası yalnızca
-senin karşılığın da masadayken ve aynı anda el değiştirir; sohbette "suyu ver, sonra bandaj veririm" gibi bir
-pazarlığa NPC "ver" diye cevap verse bile eşya doğrudan verilmez, takas masasına konur. Eşyalar
-takas olana kadar senin envanterinde kalır (başka yere taşırsan masadan düşer); giyilen, elde tutulan, takılı ve
-favori eşyalar ile içi dolu çantalar teklif edilemez. Pencere açık envanter pencerelerinin yanına açılır; yazı kutusu
-klavyeyi yalnızca pencereye tıklayınca alır, envantere ya da dünyaya tıklayınca tuşlar oyuna döner. Sahte
-sağlayıcı masada bir şey varsa kabul eder, "teklif" / "offer" deyince kendi ilk eşyasını önerir.
+**Trading:** drag items from your inventory (vanilla or Inventory Tetris) to the trade section on the right of the
+window; click the NPC's items you want (right-click for fewer). "Offer" puts the trade to the NPC together with your
+message; the NPC accepts (the exchange happens at once), refuses, or makes a counter-offer with its own items and says
+what it wants in return (the items it wants are put on the table for you; "Accept" takes the deal). There is no credit:
+the NPC's items change hands only together with your part, at the same moment; even if the NPC answers a bargain like
+"give me the water and I'll give you a bandage later" with "give", nothing is handed over directly, it goes on the
+trade table. Items stay in your inventory until the trade happens (move one elsewhere and it leaves the table); worn,
+held, attached and favourite items and bags with something inside cannot be offered. The window opens beside open
+inventory windows; the text box takes the keyboard only when you click the window, and the keys go back to the game
+when you click the inventory or the world. The fake provider accepts when something is on the table, and offers its
+own first item when you say "teklif" / "offer".
 
-Sidecar yoksa, LLM hata verirse, NPC çatışmadaysa ya da düşmansa A-Life'ın kendi replikleri kullanılır.
-Şimdilik yalnızca tek oyunculu.
+Without the sidecar, when the LLM fails, or when the NPC is fighting or hostile, A-Life's own lines are used.
+Single player only for now.
 
-## Davranış klonlama (3. aşama)
+## Behaviour cloning (phase 3)
 
-Amaç: önce A-Life'ın kendi kararlarını taklit eden bir policy (sonra PPO ile geliştirilecek).
+Goal: first a policy that imitates A-Life's own decisions (to be improved with PPO later).
 
-1. **Veri toplama:** sidecar açıkken oyna. Mod A-Life'ın her kararını izler (değiştirmez): hangi modülü seçti
-   (`regroup`, `orders`, `flee` ... ya da `default`) ve NPC ne görüyordu (43 özellik: sağlık, mermi, tehdit,
-   yakındaki zombi/squad, oyuncu ve tutum, saat, emir, LLM güven/korku ...). Kayıtlar
-   `%LOCALAPPDATA%\ALifeBrain\dataset\decisions-<tarih>.jsonl` dosyasına gider. Farklı durumlar ne kadar çeşitliyse
-   o kadar iyi: dost ve düşman NPC'ler, gece/gündüz, zombi kalabalığı, takip emri, çatışma.
-   Debug konsolunda `ALifeBrain.status()` (`decisions.sent`) ve `ALifeBrain.policy()` (en sık seçimler).
-2. **Eğitim** (bir kez: `py -3.12 -m venv rl\.venv` ve `rl\.venv\Scripts\python -m pip install -r rl\requirements.txt`):
+1. **Collecting data:** play with the sidecar running. The mod watches every A-Life decision (without changing it):
+   which module it chose (`regroup`, `orders`, `flee` ... or `default`) and what the NPC saw (43 features: health,
+   ammunition, threat, nearby zombies / squad, the player and the stance, time of day, orders, LLM trust / fear ...).
+   The records go to `%LOCALAPPDATA%\ALifeBrain\dataset\decisions-<date>.jsonl`. The more varied the situations, the
+   better: friendly and hostile NPCs, night / day, zombie crowds, follow orders, fights.
+   In the debug console: `ALifeBrain.status()` (`decisions.sent`) and `ALifeBrain.policy()` (the most frequent
+   choices).
+2. **Training** (once: `py -3.12 -m venv rl\.venv` and `rl\.venv\Scripts\python -m pip install -r rl\requirements.txt`):
 
    ```bash
    rl\run-bc.cmd
    ```
 
-   Her zincir (`decision`, `response`) için en az 300 karar gerekir. Doğrulama kümesi eğitimde hiç görülmemiş
-   NPC'lerden oluşur; çıktı doğruluğu "hep en sık seçimi yap" tabanıyla birlikte yazar. Sonuç
-   `mod/.../ALifeBrain/PolicyWeights.lua` dosyasına yazılır (`--dry-run` yalnızca raporlar). Bir modülün hatalı
-   çalıştığı döneme ait kararlar `--exclude <eylem>` ile dışarıda bırakılır (ör. 2026-10-10'daki donma için
-   `--exclude alifeBrainStandoff`).
-3. **Gölge modu:** oyunu yeniden başlat. Policy her örneklenen kararda kendi seçimini yapar ama **uygulamaz**;
-   `ALifeBrain.policy()` A-Life ile ne kadar aynı seçtiğini gösterir. Kontrolü devralması 4./5. aşamada.
+   Each chain (`decision`, `response`) needs at least 300 decisions. The validation set is made of NPCs never seen in
+   training; the output prints the accuracy next to the "always pick the most frequent choice" baseline. The result is
+   written to `mod/.../ALifeBrain/PolicyWeights.lua` (`--dry-run` only reports). Decisions from a period when a module
+   misbehaved are left out with `--exclude <action>` (e.g. `--exclude alifeBrainStandoff` for the freeze on
+   2026-10-10).
+3. **Shadow mode:** restart the game. The policy makes its own choice at every sampled decision but **does not apply
+   it**; `ALifeBrain.policy()` shows how often it agrees with A-Life. Taking over control is phases 4 / 5.
 
-## PPO (4. aşama)
+## PPO (phase 4)
 
-`rl/alifebrain_rl/sim.py`: A-Life'ın ekran dışı squad simülasyonuna benzeyen bir Gymnasium ortamı. Bir NPC ve
-squad'ı sakin anlardan (`decision` zinciri: devriye, toplama, toparlanma, dinlenme, emir, uyarma, soygun) ve
-tehditlerden (`response` zinciri: savaş, kaç, panik, destek çağır, oyuncuya çekil, NPC'yi uyar, pazarlık) geçer;
-çatışmalar A-Life'ın çevrimdışı güç modeliyle çözülür. Gözlem oyunun `Features.lua` vektörünün aynısı
-(`features.py`), eylemler A-Life modül id'leri: eğitilen ağ oyunda değişmeden çalışır. Güven / korku / hedef her
-bölümde rastgele çekilir ve neyin kazandırdığını değiştirir (güvenilen oyuncuyu takip et, onu soyma; korku oyuncunun
-ne kadar tehlikeli olduğunu söyler: korkulan oyuncu daha sert dövüşür, yakındaki silahlı oyuncu uyarılıp uzaklaştırılır;
-hedef −1 temkinli: her yeni tehdit hayatta kalma ağırlığıyla ek bedel ↔ +1 ganimet ve çatışma) → diyalogla ayarlanan
-tek policy. Oyuncu olduğu yerin çevresinde kalır (uyarılırsa çoğunlukla uzaklaşır), yani yakın karşılaşmalar sürer.
+`rl/alifebrain_rl/sim.py`: a Gymnasium environment like A-Life's off-screen squad simulation. An NPC and its squad go
+through calm moments (the `decision` chain: patrol, gather, recover, rest, orders, warn, rob) and threats (the
+`response` chain: fight, flee, panic, call for support, fall back to the player, warn the NPC, parley); fights are
+settled with A-Life's offline power model. The observation is the same as the game's `Features.lua` vector
+(`features.py`), the actions are A-Life module ids: the trained net runs in game unchanged. Trust / fear / goal are drawn
+at random in every episode and change what pays off (follow a trusted player, do not rob them; fear says how dangerous
+the player is: a feared player fights harder, an armed player nearby is warned off; goal -1 careful: every new threat
+costs extra by the survival weight <-> +1 loot and fights) -> one policy steered by dialogue. The player stays around
+their spot (when warned they mostly move away), so close encounters go on.
 
-Kurulum (bir kez): `rl\.venv\Scripts\python -m pip install -r rl\requirements-ppo.txt --extra-index-url
-https://download.pytorch.org/whl/cpu` (torch CPU, Stable-Baselines3, Gymnasium).
+Setup (once): `rl\.venv\Scripts\python -m pip install -r rl\requirements-ppo.txt --extra-index-url
+https://download.pytorch.org/whl/cpu` (CPU torch, Stable-Baselines3, Gymnasium).
 
 ```bash
 rl\run-ppo.cmd
 ```
 
-Varsayılan 3 milyon adım CPU'da ~20 dakika sürer (`--timesteps` ile değişir; 1 milyonda bazı tohumlar "her yerde
-topla"ya çöküyordu). Çıktı: PPO ile iki temel çizginin (A-Life benzeri kural, rastgele) getiri /
-ölüm / squad kaybı karşılaştırması, güven, korku, hedef değişince ilk seçimin nasıl değiştiği ve bütün bölümler boyunca
-alışkanlıklar (ör. yalnızken toplama oranı hedef > +0.5 ve < −0.5 iken; köşeli parantezde A-Life benzeri kural). Ağırlıklar
-`rl\out\PolicyWeights.ppo.lua`'ya yazılır; `--install` moddaki `PolicyWeights.lua`'ya da yazar (oyunda gölge modu).
-Simülasyondaki bütün sayılar tasarım tercihidir (`SETTINGS`), ölçüm değil.
+The default 3 million steps take ~20 minutes on a CPU (change with `--timesteps`; at 1 million some seeds collapsed
+into "gather everywhere"). Output: returns / deaths / squad losses of PPO against two baselines (an A-Life-like rule,
+random), how the first choice changes as trust, fear and goal change, and habits over whole episodes (e.g. how often it
+gathers alone with goal > +0.5 and < -0.5; the A-Life-like rule in square brackets). The weights are written to
+`rl\out\PolicyWeights.ppo.lua`; `--install` also writes them to the mod's `PolicyWeights.lua` (shadow mode in game).
+Every number in the simulation is a design choice (`SETTINGS`), not a measurement.
 
-Testler: `rl\.venv\Scripts\python -m unittest discover rl\tests` (rl klasöründen: `.venv\Scripts\python -m unittest
+Tests: `rl\.venv\Scripts\python -m unittest discover rl\tests` (from the rl folder: `.venv\Scripts\python -m unittest
 discover tests`).
 
-## Konuşma → davranış (5. aşama)
+## Conversation -> behaviour (phase 5)
 
-Policy'nin girdileri konuşmalardan gelir (`Dialogue.minds`):
-- **Güven / korku** oyuncuya karşıdır (LLM her cevapta ±10 oynatır).
-- **Atılganlık** (`goal`) NPC'nin kendisine aittir: −100 sakin dur, güvende kal ↔ +100 ganimet için dışarı çık, risk al.
-  - LLM her cevapta `goal_delta` ile en çok ±25 oynatır. Örneğin "doğuda bir sürü var, dikkat et" atılganlığı düşürür;
-    "eczanede ilaç var" yükseltir.
-  - Değer 30 dakikalık yarı ömürle 0'a söner, yani tek bir konuşma NPC'yi kalıcı olarak değiştirmez.
-  - Sohbet penceresinin başlığında "Atılganlık" olarak görünür.
+The policy's inputs come from conversations (`Dialogue.minds`):
+- **Trust / fear** are toward the player (the LLM moves them by up to ±10 per reply).
+- **Drive** (`goal`) belongs to the NPC itself: -100 lie low, stay safe <-> +100 go out for loot, take risks.
+  - The LLM moves it by up to ±25 per reply with `goal_delta`. For example "there are a lot of them to the east, be
+    careful" lowers the drive; "there is medicine in the pharmacy" raises it.
+  - The value settles to 0 with a 30-minute half-life, so one conversation does not change the NPC for good.
+  - It shows as "Drive" in the header of the chat window.
 
-Bu oturumda konuşulmamış NPC'lerin kayıtlı ruh hali, policy onlarla ilk karşılaştığında sidecar'dan istenir
-(`moods` isteği).
+The stored mood of NPCs not talked to in this session is asked from the sidecar the first time the policy meets them
+(`moods` request).
 
-**Policy kontrolü** varsayılan olarak kapalı. Açmak için Seçenekler → Modlar → A-Life Brain → **NPC davranışını
-eğitilmiş policy seçsin**. Değeri oyun kendi `ModOptions.ini` dosyasında tutar. Hata ayıklama konsolunda
-`ALifeBrain.control(true)` bu oturum için açar, `false` kapatır, `"option"` yeniden menüdeki ayara döner.
+**Policy control** is off by default. To turn it on: Options -> Mods -> A-Life Brain -> **Trained policy chooses NPC
+behaviour**. The game keeps the value in its own `ModOptions.ini`. In the debug console `ALifeBrain.control(true)` turns
+it on for this session, `false` turns it off, `"option"` goes back to the menu setting.
 
-Kontrol açıkken:
-- Policy, A-Life zinciri çalışmadan önce A-Life'ın kendi modüllerinden birini seçer ve o modül tek başına çalışır.
-  Modülün yapacak işi yoksa ya da seçim A-Life'ın kendi akışıysa (`default`), A-Life eskisi gibi karar verir.
-- Policy yalnızca bir seçim ekler, A-Life'ın bir seçimini asla engellemez:
-  - **Hep A-Life'ta kalır:**
-    - Oyuncunun emri (takip et / bekle).
-    - Konuşma (pencere açık ya da cevap yolda).
-    - Süren bir soygun.
-    - NPC'nin dahil olduğu bir pazarlık ya da NPC↔NPC uyarı merdiveni.
-    - Tehdit olarak oyuncu.
-    - Oyuncuya düşman tutumlu bir NPC, oyuncu 55 karenin içindeyken (A-Life'ın soygun modülü oyuncuyu bu mesafeden
-      fark eder).
-  - **Policy hiç seçmez:** `talk`, `robbery`, `orders`, takipçi ve pazarlık modülleri.
-  - **Oyuncu 20 karenin içindeyken** policy yalnızca bir uyarı (`careful`) ekleyebilir. Böylece A-Life'ın selamlaması
-    (6 kare) ve uyarısı (14 kare) sırasını korur.
-- Policy aynı NPC ve zincir için en çok 2,5 saniyede bir sorulur.
+While control is on:
+- Before A-Life's chain runs, the policy picks one of A-Life's own modules and that module runs alone. When the module
+  has nothing to do, or the choice is A-Life's own flow (`default`), A-Life decides as before.
+- The policy only adds a choice, it never blocks one of A-Life's:
+  - **Always left to A-Life:**
+    - The player's orders (follow / wait).
+    - A conversation (window open or a reply on the way).
+    - A robbery in progress.
+    - A parley or an NPC<->NPC warning ladder the NPC is part of.
+    - The player as a threat.
+    - An NPC hostile to the player while the player is within 55 tiles (A-Life's robbery module notices the player at
+      that range).
+  - **Never chosen by the policy:** `talk`, `robbery`, `orders`, the follower and parley modules.
+  - **While the player is within 20 tiles** the policy may only add a warning (`careful`). That way A-Life's greeting
+    (6 tiles) and warning (14 tiles) keep their order.
+- The policy is asked at most once every 2.5 seconds per NPC and chain.
 
-`ALifeBrain.control()` (ya da `ALifeBrain.policy()`) şunları gösterir:
-- policy'nin neyi kaç kez çalıştırdığı;
-- yapacak işi olmayan seçimler;
-- kararın kaç kez ve neden A-Life'a bırakıldığı.
+`ALifeBrain.control()` (or `ALifeBrain.policy()`) shows:
+- what the policy ran and how often;
+- the choices that had nothing to do;
+- how often a decision was left to A-Life, and why.
 
-Gölge modu istatistikleri yalnızca A-Life'ın kendi seçtiği kararları sayar. Policy'nin çalıştırdığı kararlar
-veri setine işaretli yazılır (`chosen`) ama eğitime girmez. Kontrol açıkken sayaçlar 5 dakikada bir `sidecar.log`'a da
-yazılır ("policy control: ..."), yani oynanıştan sonra konsola bakmadan okunabilir.
+Shadow-mode statistics count only the decisions A-Life chose itself. Decisions the policy ran are written to the
+dataset with a mark (`chosen`) but stay out of training. While control is on, the counters are also written to
+`sidecar.log` every 5 minutes ("policy control: ..."), so they can be read after playing without the console.
 
-**Güven tutumu değiştirir:** temkinli bir fraksiyonun NPC'si (A-Life: yaklaşanı "geri dur", "son uyarı" diye uyarır,
-uyarıları dinlemeyene ateş açar) sana en az 5 güvenince bütün grubu yaklaşmana izin verir: A-Life'ın kendi
-`Talk.tolerate` kolu, temkinli → tarafsız; uyarılar durur, pencerenin başlığında "Sana güveniyor" yazar, LLM'e de
-söylenir. Güven 3'ün altına düşünce geri alınır. Düşman gruplar düşman kalır; vurursan grup yine döner.
-Konuşmadan da olur: hediye, adil takas ya da yanlarında zombi öldürmek güveni sidecar'da artırır ve oyun bunu hemen
-öğrenir.
+**Trust changes the stance:** when an NPC of a careful faction (A-Life: it warns anyone coming close with "keep back",
+"last warning" and opens fire on whoever ignores the warnings) trusts you at least 5, its whole group lets you come
+close: A-Life's own `Talk.tolerate` lever, careful -> neutral; the warnings stop, the window header says "Trusts you",
+and the LLM is told. It is taken back when trust drops below 3. Hostile groups stay hostile; hit one and the group turns
+on you again. It works without talking too: a gift, a fair trade or killing zombies next to them raises trust in the
+sidecar, and the game learns it at once.
 
-Takip: LLM takibi kabul ederse NPC, oyuncuya güvensiz (güven < 0) ya da düşman değilse takip eder. Hafıza: fraksiyon
-anıları kayıt (save) başınadır; eski bir kayıtta öldürdüğün biri yeni dünyadaki NPC'lerin hafızasına girmez.
+Following: when the LLM agrees to follow, the NPC follows unless it distrusts the player (trust < 0) or is hostile.
+Memory: faction memories are per save; someone you killed in an old save does not get into the memory of the NPCs in
+a new world.

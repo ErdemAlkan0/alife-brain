@@ -1,53 +1,52 @@
-# Dosya köprüsü protokolü (v1)
+# File bridge protocol (v1)
 
-Uygulama: Lua `mod/Contents/mods/ALifeBrain/42/media/lua/shared/ALifeBrain/Bridge.lua`,
+Implementation: Lua `mod/Contents/mods/ALifeBrain/42/media/lua/shared/ALifeBrain/Bridge.lua`,
 Python `sidecar/alifebrain_sidecar/` (`protocol.py`, `files.py`, `app.py`).
 
-## Dosyalar (hepsi `Zomboid/Lua/` içinde, düz ad)
+## Files (all in `Zomboid/Lua/`, flat names)
 
-| Dosya | Yazan | Okuyan | Nasıl |
+| File | Written by | Read by | How |
 |---|---|---|---|
-| `alifebrain_req.txt` | Lua (ekleme) | sidecar | Sidecar dosyayı **yeniden adlandırarak** sahiplenir; Lua bir sonraki yazışta yenisini oluşturur. Lua hiçbir zaman kesme/temizleme yapmaz. |
-| `alifebrain_req.processing` | sidecar | sidecar | Sahiplenilen parti; okunduktan sonra silinir. Çökmeden kalırsa önce o işlenir. |
-| `alifebrain_res.txt` | sidecar (atomik değiştirme) | Lua (~250 ms'de bir) | `alifebrain_res.tmp`'ye yazılır, `os.replace` ile değiştirilir. |
+| `alifebrain_req.txt` | Lua (append) | sidecar | The sidecar claims the file by **renaming** it; Lua creates a new one on its next write. Lua never truncates or cleans it. |
+| `alifebrain_req.processing` | sidecar | sidecar | The claimed batch; deleted once read. If it is left behind by a crash, it is processed first. |
+| `alifebrain_res.txt` | sidecar (atomic replace) | Lua (every ~250 ms) | Written to `alifebrain_res.tmp`, then swapped in with `os.replace`. |
+| `alifebrain_res.tmp` | sidecar | — | Temporary. |
 
-İçerik JSON satırlarıdır ama uzantı `.txt`'dir: B42'de `getFileWriter` yalnızca `txt, ini, cfg, json, lua, log`
-uzantılarına yazar, `.jsonl` gibi diğerlerini hata vermeden reddeder.
-| `alifebrain_res.tmp` | sidecar | — | Geçici. |
+The content is JSON lines but the extension is `.txt`: in B42 `getFileWriter` writes only `txt, ini, cfg, json, lua,
+log` and refuses others such as `.jsonl` without an error.
 
-Windows'ta oyun bir dosyayı açık tuttuğu sürece yeniden adlandırma/değiştirme başarısız olur; sidecar bu durumda
-bir sonraki adımda tekrar dener. Böylece yarım satır asla okunmaz. Sidecar bu dört dosya dışında `Zomboid/Lua`'ya
-dokunmaz.
+On Windows a rename / replace fails while the game holds the file open; the sidecar then tries again on its next step.
+That way a half line is never read. The sidecar touches nothing in `Zomboid/Lua` but these four files.
 
-Bütün satırlar **ASCII** JSON'dur (ASCII dışı karakterler `\uXXXX`), bu yüzden dosya kodlaması önemli değildir.
+Every line is **ASCII** JSON (non-ASCII characters as `\uXXXX`), so the file encoding does not matter.
 
-## Lua → sidecar (istek satırı)
+## Lua -> sidecar (request line)
 
 ```json
-{"v":1,"id":"<sess>:<seq>","sess":"<sess>","type":"ping","ts":1759951234567,"world":"Apocalypse/<kayıt adı>","data":{...},"ack":{"sid":"a1b2c3d4","rseq":7}}
+{"v":1,"id":"<sess>:<seq>","sess":"<sess>","type":"ping","ts":1759951234567,"world":"Apocalypse/<save name>","data":{...},"ack":{"sid":"a1b2c3d4","rseq":7}}
 ```
 
-- `sess`: oyun açılışında üretilir (`<ms>-<rastgele>`). Her yeni oyun yüklemesinde değişir.
-- `id`: oturum içinde benzersiz; cevaplar `re` alanında buna atıf yapar.
-- `ts`: Lua'nın `getTimestampMs()` değeri (duvar saati, ms).
-- `world` (isteğe bağlı): oynanan kayıt, `<oyun modu>/<kayıt adı>` (`Hooks.worldKey`, oyunun kendi kayıt
-  listesindeki gibi). Sidecar fraksiyon anılarını kayıt başına tutar (`memory.faction_key`): A-Life rol adlarını
-  her ekipte tekrar kullanır ("Deputy Rowe"), eski bir test kaydındaki ölüm yeni dünyaya karışmasın. `world`
-  olmadan yazılmış eski fraksiyon anıları bir kayıtta artık okunmaz.
-- `ack` (isteğe bağlı): Lua'nın o sidecar örneğinden (`sid`) işlediği en büyük `rseq`. Her mesaja eklenir; gönderilecek
-  başka bir şey yoksa en fazla saniyede bir ayrı bir `ack` mesajı gider.
-- `type` değerleri (v1): `hello`, `ping`, `event`, `dialogue`, `history`, `moods`, `ack`. `event` ve `ack` için cevap satırı yazılmaz
-  (`event` hatalıysa yazılır).
-- `hello` cevabı `features` listesi döner (`ping`, `event`, `dataset`, hafıza varsa `history` ve `moods`, sağlayıcı ve
-  hafıza hazırsa `dialogue`, `actions`); Lua diyalog kancasını yalnızca `dialogue`, karar örneklemesini yalnızca
-  `dataset`, kayıtlı ruh hali isteğini yalnızca `moods` varsa kullanır.
+- `sess`: made when the game starts (`<ms>-<random>`). It changes with every new game load.
+- `id`: unique within the session; replies refer to it in their `re` field.
+- `ts`: Lua's `getTimestampMs()` (wall clock, ms).
+- `world` (optional): the save being played, `<game mode>/<save name>` (`Hooks.worldKey`, as in the game's own save
+  list). The sidecar keeps faction memories per save (`memory.faction_key`): A-Life reuses role names in every crew
+  ("Deputy Rowe"), so a death in an old test save must not leak into a new world. Old faction memories written without
+  `world` are no longer read in any save.
+- `ack` (optional): the highest `rseq` Lua has processed from that sidecar instance (`sid`). It is added to every
+  message; when there is nothing else to send, a separate `ack` message goes at most once a second.
+- `type` values (v1): `hello`, `ping`, `event`, `dialogue`, `history`, `moods`, `ack`. No reply line is written for
+  `event` and `ack` (one is written for a bad `event`).
+- The `hello` reply returns a `features` list (`ping`, `event`, `dataset`, `history` and `moods` when there is memory,
+  `dialogue` and `actions` when the provider and memory are ready); Lua uses the dialogue hook only with `dialogue`,
+  decision sampling only with `dataset`, and stored-mood requests only with `moods`.
 
-### `dialogue` (2. aşama)
+### `dialogue` (phase 2)
 
-İstek `data` (Lua `Hooks.dialogueContext` + `Dialogue.handle`):
+Request `data` (Lua `Hooks.dialogueContext` + `Dialogue.handle`):
 
 ```json
-{"text": "Su var mı?", "stance": "neutral",
+{"text": "Got any water?", "stance": "neutral",
  "npc": {"uid": "palife:...", "name": "...", "factionId": "...", "factionName": "...", "groupId": "...",
          "roleLabel": "Militia - Rifleman", "temperament": "seasoned", "sex": "m", "behaviorState": "idle", "wounds": 0},
  "player": {"key": "sp:0", "weapon": "hammer"},
@@ -55,67 +54,69 @@ Bütün satırlar **ASCII** JSON'dur (ASCII dışı karakterler `\uXXXX`), bu y�
  "world": {"town": "Muldraugh", "hour": 14, "day": 2}}
 ```
 
-İstekte ayrıca `npc.inventory` (`{"water": 1, "food": 0, "medicine": 2}`, A-Life'ın verilebilir eşya kurallarıyla
-sayılır) ve `npc.following` (NPC şu an bu oyuncuyu takip ediyor mu) gelir. `vouched: true`: NPC'nin grubu aslında
-temkinli ama bu NPC oyuncuya güvendiği için yaklaşmasına izin veriyor (`Rapport.lua`; `stance` o zaman `neutral`
-gelir); prompt "geri dur" dememesini söyler.
+The request also carries `npc.inventory` (`{"water": 1, "food": 0, "medicine": 2}`, counted by A-Life's rules for items
+it may hand out) and `npc.following` (whether the NPC is following this player right now). `vouched: true`: the NPC's
+group is careful, but it lets the player come close because this NPC trusts them (`Rapport.lua`; `stance` then comes as
+`neutral`); the prompt tells it not to say "keep back".
 
-Cevap `data`: `{"say": "...", "intent": "none|give|follow|stay|leave|trade|warn|attack|rob|give_info",
+Reply `data`: `{"say": "...", "intent": "none|give|follow|stay|leave|trade|warn|attack|rob|give_info",
 "item": "water|food|medicine|null", "trustDelta": 0, "fearDelta": 0, "trust": 0, "fear": 0, "goalDelta": 0,
-"goal": 0}`. `item` yalnızca `give` ile gelir. `goal` NPC'nin atılganlığıdır (5. aşama, policy'nin `goal` girdisi;
-−100 sakin dur, güvende kal ↔ 100 ganimet için dışarı çık, risk al): oyuncu başına değil NPC başına tutulur, LLM her
-cevapta `goal_delta` ile en çok ±25 oynatır, 30 dakikalık yarı ömürle 0'a söner (`memory.GOAL_HALF_LIFE_MS` =
-`Dialogue.GOAL_HALF_LIFE_MS`; değer cevap anındaki hâlidir, oyun kendi saatiyle söndürmeye devam eder).
+"goal": 0}`. `item` comes only with `give`. `goal` is the NPC's drive (phase 5, the policy's `goal` input; -100 lie
+low, stay safe <-> 100 go out for loot, take risks): it is kept per NPC, not per player, the LLM moves it by up to ±25 per
+reply with `goal_delta`, and it settles to 0 with a 30-minute half-life (`memory.GOAL_HALF_LIFE_MS` =
+`Dialogue.GOAL_HALF_LIFE_MS`; the value is the one at reply time, the game keeps settling it with its own clock).
 
-İstekte `world.language` oyunun dil kodudur (`TR`, `EN` ...). Pazarlıkta (`Parley.lua`) `standoff: {"opening": bool,
-"feud": bool}` gelir: NPC düşmandır ve oyuncuyu ateş etmeden durdurmuştur. `feud = true`: ekip yalnızca fraksiyonu
-oyuncuyu başka gruplarına yaptıkları yüzünden düşman saydığı için düşmandır (A-Life itibarı); prompt öfkeli ama önce
-konuşan bir ekip tarif eder. `opening = true` ise NPC ilk konuşur; `text` oyuncunun
-sözü değil bir anlatımdır (hafızaya oyuncu satırı olarak yazılmaz, prompt'a dil adıyla eklenir). Pazarlıkta
-`intent attack` çatışmayı, `intent leave` oyuncuyu bırakmayı başlatır; haraç `trade` (`decision: counter`,
-`npcWants`, boş `npcOffer`) ile istenir.
+`world.language` in the request is the game's language code (`TR`, `EN` ...). The interface is English only, but the
+NPC answers in the language the player writes in (Turkish and English alike); an NPC that speaks first uses this code.
+In a parley (`Parley.lua`) the request carries `standoff: {"opening": bool, "feud": bool}`: the NPC is hostile and has
+stopped the player before shooting. `feud = true`: the crew is hostile only because its faction counts the player as
+an enemy for what they did to its other groups (A-Life reputation); the prompt describes an angry crew that still
+speaks first. With `opening = true` the NPC speaks first; `text` is then a narration, not the player's words (it is not
+written into memory as a player line, and goes into the prompt with the language name). In a parley `intent attack`
+starts the fight and `intent leave` lets the player go; a toll is asked through `trade` (`decision: counter`,
+`npcWants`, empty `npcOffer`).
 
-#### Takas alanları
+#### Trade fields
 
-İstekte `npc.tradeable` (`[{"name": "Konserve Fasulye", "count": 2}]`, NPC'nin elde/üstte/takılı olmayan, anahtar ya da
-içi dolu çanta olmayan eşyaları, en çok 30 tür) ve masada bir şey varsa `trade`:
-`{"playerOffer": [{"name", "count"}], "npcSide": [{"name", "count"}]}` (oyuncunun koyduğu / NPC'den istediği).
-Sohbet penceresi açıkken istekte ayrıca `player.tradeable` (oyuncunun takas edebileceği eşyalar, aynı biçim) gelir;
-NPC bunlardan isteyebilir.
-Cevapta `trade`: `null` ya da `{"decision": "accept|reject|counter", "npcOffer": ["..."], "npcWants": ["..."]}`.
-`accept` masadaki değişimi şimdi yaptırır; `counter` NPC'nin kendi eşyalarını (yalnızca `tradeable` adları) masaya
-koyar ve `npcWants` (yalnızca `player.tradeable` adları) varsa oyuncunun tarafını tam olarak bunlarla doldurur
-(eşyalar yine oyuncuda kalır); oyuncu "Kabul et" ile yeni bir LLM çağrısı olmadan alabilir.
+The request carries `npc.tradeable` (`[{"name": "Canned Beans", "count": 2}]`, the NPC's items that are not held / worn /
+attached, not keys and not bags with items inside, at most 30 kinds) and, when something is on the table, `trade`:
+`{"playerOffer": [{"name", "count"}], "npcSide": [{"name", "count"}]}` (what the player put down / asked from the NPC).
+While the conversation window is open the request also carries `player.tradeable` (the items the player could trade,
+same format); the NPC may ask for them.
+The reply's `trade`: `null` or `{"decision": "accept|reject|counter", "npcOffer": ["..."], "npcWants": ["..."]}`.
+`accept` makes the exchange on the table now; `counter` puts the NPC's own items (only `tradeable` names) on the table
+and, with `npcWants` (only `player.tradeable` names), fills the player's side with exactly those (the items still stay
+with the player); the player can take it with "Accept" without another LLM call.
 
-**Veresiye yok:** değişimi her zaman oyun yapar (`Hooks.executeTrade`): önce her iki tarafın eşyaları yeniden
-doğrulanır; NPC bir şey veriyorsa oyuncunun tarafı boş olamaz (`unpaid`); önce oyuncunun eşyaları taşınır, sonra
-NPC'ninkiler; bir eşya taşınamazsa bütün taşımalar geri alınır. Oyuncu beklerken masayı değiştirdiyse kabul
-geçersizdir. Sidecar ayrıca pazarlığın parçası olan bir `give`'i (oyuncunun ya da NPC'nin sözünde "karşılığında",
-"takas", oyuncunun sözünde "veririm", "I'll pay" vb.) takas önerisine çevirir: NPC'nin eşyası masaya konur, oyuncunun
-adını andığı eşyası istenir.
+**No credit:** the game always makes the exchange (`Hooks.executeTrade`): first both sides' items are validated again;
+when the NPC gives something, the player's side cannot be empty (`unpaid`); the player's items move first, then the
+NPC's; if one item cannot move, every move is undone. If the player changed the table while waiting, the accept is void.
+The sidecar also turns a `give` that is part of a bargain (words like "in return", "trade" from the player or the NPC,
+"I'll give", "I'll pay" from the player, in Turkish too, e.g. "karşılığında", "takas", "veririm") into a trade offer:
+the NPC's item goes on the table and the player's item they named is asked for.
 
 ### `history`
 
-İstek `data`: `{"uid": "...", "playerKey": "sp:0", "limit": 30}`. Cevap: `{"uid", "name", "trust", "fear", "goal",
-"turns": [{"speaker": "player|npc|system", "text": "...", "ts": 0}]}` (eskiden yeniye). `system` satırları oyunda
-gerçekte olanlardır (ör. "Henry handed over Water Bottle.").
+Request `data`: `{"uid": "...", "playerKey": "sp:0", "limit": 30}`. Reply: `{"uid", "name", "trust", "fear", "goal",
+"turns": [{"speaker": "player|npc|system", "text": "...", "ts": 0}]}` (oldest first). `system` lines are what really
+happened in the game (e.g. "Henry handed over Water Bottle.").
 
-### `moods` (5. aşama)
+### `moods` (phase 5)
 
-Policy'nin girdisi için, bu oturumda konuşulmamış NPC'lerin kayıtlı ruh hali (`Moods.lua`). İstek `data`:
-`{"playerKey": "sp:0", "uids": ["palife:...", ...]}` (en çok 32 uid; oyun 24'lük gruplarla, 3 s'de en çok bir
-istek gönderir). Cevap: `{"moods": [{"uid", "trust", "fear", "goal"}], "goalHalfLifeMs": 1800000}`; yalnızca
-sidecar'da bir şeyi kayıtlı NPC'ler listelenir (gerisi 0'dan başlar; oyun onları 5 dakika sonra yeniden sorar).
-Oyun bunları yalnızca elinde olmayan NPC'ler için `Dialogue.minds`'a yazar; bu oturumdaki bir cevap her zaman daha
-yenidir. İstisna: oyuncunun bir olayı sidecar'da güveni ya da korkuyu değiştirdiyse (`npc_hit`, `player_helped`,
-`robbed_player` ekibi, başarılı `npc_action` trade/give) oyun o NPC'yi bilse de yeniden sorar (`Moods.refresh`) ve
-cevabı güven/korku/atılganlığın yerine yazar (`Dialogue.updateMood`, son niyet kalır). Olay satırı istekten önce
-yazıldığı için sidecar onu önce uygular.
+The stored mood of NPCs not talked to in this session, for the policy's input (`Moods.lua`). Request `data`:
+`{"playerKey": "sp:0", "uids": ["palife:...", ...]}` (at most 32 uids; the game sends batches of 24, at most one request
+every 3 s). Reply: `{"moods": [{"uid", "trust", "fear", "goal"}], "goalHalfLifeMs": 1800000}`; only NPCs with something
+stored in the sidecar are listed (the rest start at 0; the game asks for them again after 5 minutes).
+The game writes them into `Dialogue.minds` only for NPCs it does not know yet; a reply from this session is always
+fresher. Exception: when one of the player's events changed trust or fear in the sidecar (`npc_hit`, `player_helped`,
+the crew of `robbed_player`, a successful `npc_action` trade / give), the game asks again although it knows the NPC
+(`Moods.refresh`) and writes the answer over trust / fear / drive (`Dialogue.updateMood`; the last intent stays). The
+event line is written before the request, so the sidecar applies it first.
 
-### `decision_samples` (3. aşama, davranış klonlama verisi)
+### `decision_samples` (phase 3, behaviour cloning data)
 
-`event` olarak gelir (`DecisionLog.lua`), sidecar `hello` cevabında `dataset` özelliğini bildirdiyse gönderilir;
-hafızaya ve `events.jsonl`'e girmez:
+Sent as an `event` (`DecisionLog.lua`) when the sidecar announced the `dataset` feature in its `hello` reply; it does
+not go into memory or `events.jsonl`:
 
 ```json
 {"kind": "decision_samples", "schema": 1, "names": ["health", "..."],
@@ -123,73 +124,79 @@ hafızaya ve `events.jsonl`'e girmez:
            "u": "palife:...", "f": "alife_church_volunteers", "p": "...", "t": 1791496029466, "pa": "regroup"}]}
 ```
 
-- `d`: A-Life zinciri (`decision` tehdit yokken, `response` tehdide), `a`: kazanan modül id'si ya da `default`
-  (A-Life'ın kendi geri düşüşü), `o`: `Features.vector` (3 hane yuvarlanmış), `m`: o NPC'nin o zincirde izinli
-  modülleri, `pa`: gölge modundaki policy'nin seçimi (eğitilmiş ağırlık varsa).
-- `c: true` (sidecar `chosen`): modülü policy kontrolü seçti (`Control.lua`); A-Life'ın seçimi değildir, `rl/`
-  bundan öğrenmez, gölge modu karşılaştırmaz. `ctl: true` (`control`): satır policy kontrolü açıkken kaydedildi.
-- `names` her bağlantıda ilk partiyle bir kez gelir. Parti en çok 12 satır (satır sınırının altında kalsın diye).
-- Sidecar geçerli satırları `<veri klasörü>/dataset/decisions-<tarih>.jsonl`, adları `schema-<n>.json` dosyasına yazar.
-  Özellik listesi değişirse `Features.SCHEMA` artırılır; eski şemanın verisi ayrı kalır.
+- `d`: the A-Life chain (`decision` without a threat, `response` to a threat), `a`: the winning module id or `default`
+  (A-Life's own fallback), `o`: `Features.vector` (rounded to 3 digits), `m`: the modules allowed for that NPC in that
+  chain, `pa`: the shadow-mode policy's choice (when trained weights exist).
+- `c: true` (sidecar `chosen`): policy control chose the module (`Control.lua`); it is not A-Life's choice, `rl/` does
+  not learn from it and shadow mode does not compare it. `ctl: true` (`control`): the row was logged while policy
+  control was on.
+- `names` comes once per connection with the first batch. A batch has at most 12 rows (to stay below the line limit).
+- The sidecar writes valid rows to `<data folder>/dataset/decisions-<date>.jsonl` and the names to `schema-<n>.json`.
+  When the feature list changes, `Features.SCHEMA` is bumped; data of the old schema stays apart.
 
-### `event` türleri
+### `event` kinds
 
-`policy_stats` (policy kontrolü açıkken 5 dakikada bir, `ALifeBrainMain.reportPolicy`): `Control.stats`
-(`decision` / `response`: `asked`, `ran`, `declined` = yapacak işi yoktu, `near` = oyuncu yakındı, `left` = A-Life'a
-bırakıldı; `modules`: çalıştırılan modüller; `reasons`: neden bırakıldığı). `sidecar.log`'a bir satır yazılır ve
-`events.jsonl`'de kalır; hafızaya girmez.
+`policy_stats` (every 5 minutes while policy control is on, `ALifeBrainMain.reportPolicy`): `Control.stats`
+(`decision` / `response`: `asked`, `ran`, `declined` = had nothing to do, `near` = the player was near, `left` = left to
+A-Life; `modules`: the modules that ran; `reasons`: why it was left). One line goes into `sidecar.log`, and it stays in
+`events.jsonl`; it does not go into memory.
 
-`npc_hit`, `npc_died` (EventLog.lua) ve `npc_action` (Dialogue.lua): `{"kind": "npc_action", "action":
-"give|follow|stay|leave|trade", "ok": true, "item": "water", "label": "Water Bottle", "given": ["..."] (NPC'den
-oyuncuya), "received": ["..."] (oyuncudan NPC'ye), "reason": "no_item|too_far|limit|low_trust|refused|rejected|
-changed|empty|unpaid", "npc": {...}, "by": {"kind": "player", "key": "sp:0"}}`. `trust`/`fear` NPC'nin o oyuncuya karşı birikmiş değeridir (-100..100).
-`npc_hit` oyuncudan geldiyse `zombiesNear` (kurbanın 4 karesindeki sıradan zombi sayısı) taşır: > 0 ise sidecar bunu
-kaza sayar (güven −3, korku +2, "by accident" anısı; squad'a saldırı diye yazılmaz). `player_helped` (EventLog
-`onZombieKilled`): oyuncunun öldürdüğü sıradan bir zombinin 10 karesindeki her A-Life NPC'si için, NPC başına dakikada
-en çok bir kez, aradaki öldürmeler `kills` ile toplanır: güven +3 (3+ öldürmede +4), korku −1, 5 dakikada bir kişisel
-("The stranger killed ... right next to me.") ve squad anısı. Tamamlanan takasta oyuncu bir şey verdiyse güven ayrıca
-artar (hediye +6, karşılıklı +2). `reason` ayrıca `combat` olabilir (NPC çatışmanın ortasında).
-`robbed_player` (Robberies.lua): bir A-Life ekibinin oyuncuyu soyması bitti. `{"npc": <lider>, "crew": [<en çok 6
-üye>], "outcome": "released" | "execute:<fled|drew_weapon|armed|no_hands|shouted|aimed_at_crew|attacked_crew|
+`npc_hit`, `npc_died` (EventLog.lua) and `npc_action` (Dialogue.lua): `{"kind": "npc_action", "action":
+"give|follow|stay|leave|trade", "ok": true, "item": "water", "label": "Water Bottle", "given": ["..."] (from the NPC to
+the player), "received": ["..."] (from the player to the NPC), "reason": "no_item|too_far|limit|low_trust|refused|
+rejected|changed|empty|unpaid", "npc": {...}, "by": {"kind": "player", "key": "sp:0"}}`. `trust` / `fear` are the NPC's
+accumulated values toward that player (-100..100).
+An `npc_hit` from the player carries `zombiesNear` (the number of plain zombies within 4 tiles of the victim): when
+> 0 the sidecar takes it as an accident (trust -3, fear +2, a "by accident" memory; not written as an attack on the
+squad). `player_helped` (EventLog `onZombieKilled`): for every A-Life NPC within 10 tiles of a plain zombie the player
+killed, at most once a minute per NPC, with the kills in between added up in `kills`: trust +3 (+4 for 3+ kills), fear
+-1, and every 5 minutes a personal ("The stranger killed ... right next to me.") and a squad memory. When the player gave
+something in a completed trade, trust rises too (a gift +6, a fair exchange +2). `reason` can also be `combat` (the NPC
+is in the middle of a fight).
+`robbed_player` (Robberies.lua): an A-Life crew's robbery of the player has ended. `{"npc": <leader>, "crew": [<at most
+6 members>], "outcome": "released" | "execute:<fled|drew_weapon|armed|no_hands|shouted|aimed_at_crew|attacked_crew|
 hostile_surrender>" | "player_gone" | "crew_gone" | "interrupted", "taken": ["Hammer", ...], "by": {"kind": "player",
-"key"}}`. NPC'ler burada A-Life kaydından tanımlanır (`Hooks.describeRecord`: uid, name, factionId, groupId).
-`by`: `{"kind": "player", "key"}`, `{"kind": "npc", "uid"}` (`npc_died`'da ayrıca `name`, `factionId`, `groupId`:
-sidecar kaybı katilin adıyla hatırlar), `{"kind": "zombie"}` ya da `{"kind": "other"}`.
-Hata kodları: `dialogue_unavailable`, `invalid_llm_reply`, sağlayıcı kodları (`timeout`, `rate_limited`,
-`unreachable`, `unauthorized`, `player2_client_id_missing` ...). LLM çağrısı sidecar'da arka planda çalışır;
-Sidecar 60 s sonra vazgeçer (`dialogue.timeout_s`; Player2 130 cevapta ortanca 11 s, %95'i 20 s içinde, en yavaşı
-32 s, yavaş bir akşam bir sohbetin ilk cevabı 37 ve 43 s; eski 30 s sınırı cevapların %3'ünü kesiyordu, sohbet
-sırasında oyun duraklatıldığı için beklemek ucuz; dosyada eski varsayılan 30 kaldıysa 60 kullanılır). Lua 75 s bekler
-(sidecar her zaman önce cevap verir; yalnızca sidecar yoksa işe yarar), sonra A-Life'ın hazır repliğine düşer.
+"key"}}`. The NPCs here are described from A-Life's registry (`Hooks.describeRecord`: uid, name, factionId, groupId).
+`by`: `{"kind": "player", "key"}`, `{"kind": "npc", "uid"}` (in `npc_died` also `name`, `factionId`, `groupId`: the
+sidecar remembers the loss with the killer's name), `{"kind": "zombie"}` or `{"kind": "other"}`.
+Error codes: `dialogue_unavailable`, `invalid_llm_reply`, provider codes (`timeout`, `rate_limited`, `unreachable`,
+`unauthorized`, `player2_client_id_missing` ...). The LLM call runs in the background in the sidecar; the sidecar gives
+up after 60 s (`dialogue.timeout_s`; over 130 replies Player2 had a median of 11 s, 95% within 20 s, the slowest 32 s,
+and on a slow evening the first reply of a conversation took 37 and 43 s; the old 30 s limit cut off 3% of the replies;
+the game is paused during a conversation, so waiting is cheap; when the file still holds the old default 30, 60 is
+used). Lua waits 75 s (the sidecar always answers first; this only matters when the sidecar is gone), then falls back
+to A-Life's canned line.
 
-## Sidecar → Lua (cevap dosyası)
+## Sidecar -> Lua (reply file)
 
-İlk satır **her zaman** durum satırıdır, sonrakiler onaylanmamış mesajlardır:
+The first line is **always** the status line; the following ones are unacknowledged messages:
 
 ```json
-{"v":1,"type":"status","sid":"a1b2c3d4","beat":42,"ts":1759951234600,"ver":"0.1.0","sess":"<son görülen oturum>"}
-{"v":1,"type":"res","rseq":7,"re":"<istek id>","ok":true,"data":{...}}
-{"v":1,"type":"res","rseq":8,"re":"<istek id>","ok":false,"error":"unknown_type"}
-{"v":1,"type":"push","rseq":9,"sess":"<oturum>","kind":"...","data":{...}}
+{"v":1,"type":"status","sid":"a1b2c3d4","beat":42,"ts":1759951234600,"ver":"0.1.0","sess":"<last session seen>"}
+{"v":1,"type":"res","rseq":7,"re":"<request id>","ok":true,"data":{...}}
+{"v":1,"type":"res","rseq":8,"re":"<request id>","ok":false,"error":"unknown_type"}
+{"v":1,"type":"push","rseq":9,"sess":"<session>","kind":"...","data":{...}}
 ```
 
-- `sid`: sidecar süreci başına rastgele. Değişirse Lua `rseq` takibini sıfırlar.
-- `beat`: her yayında artar; sidecar boşta bile saniyede bir yayın yapar.
-- `rseq`: sidecar örneği içinde artan sıra; Lua yalnızca `lastRseq`'ten büyükleri işler (tekrarlar zararsız).
-- Sidecar, onaylanan (`rseq ≤ ack`), 120 s'den eski veya eski oturumlara ait mesajları dosyadan çıkarır.
+- `sid`: random per sidecar process. When it changes, Lua resets its `rseq` tracking.
+- `beat`: grows with every write; the sidecar writes once a second even when idle.
+- `rseq`: a growing sequence within the sidecar instance; Lua processes only those above `lastRseq` (repeats are
+  harmless).
+- The sidecar drops from the file the messages that were acknowledged (`rseq <= ack`), are older than 120 s, or belong
+  to old sessions.
 
-## Canlılık ve geri düşüş
+## Liveness and fallback
 
-- Lua, durum satırındaki `ts` kendi saatine 4 s'den yakınsa **veya** `beat` son 4 s içinde değiştiyse sidecar'ı
-  çevrimiçi sayar.
-- Çevrimdışıyken Lua dosyaya **hiç yazmaz**: `request()` hemen `nil, "offline"` döner (çağıran hazır repliğe düşer),
-  `send("event")` olayları bellekte en fazla 200 kayıtlık bir kuyrukta tutar ve bağlantı gelince orijinal `ts` ile
-  gönderir.
-- Çevrimiçiyken düşerse bekleyen bütün istekler `false, "offline"` ile sonuçlanır.
-- İstek zaman aşımı varsayılan 8 s (`ping` 5 s). Sidecar, `event`/`ack` dışındaki 30 s'den eski istekleri atar.
+- Lua counts the sidecar as online when the `ts` of the status line is within 4 s of its own clock **or** `beat`
+  changed within the last 4 s.
+- While offline Lua **never writes** to the file: `request()` returns `nil, "offline"` at once (the caller falls back to
+  a canned line), `send("event")` keeps events in a queue of at most 200 in memory and sends them with their original
+  `ts` once the connection is back.
+- If it goes offline while online, every pending request ends with `false, "offline"`.
+- The default request timeout is 8 s (`ping` 5 s). The sidecar drops requests older than 30 s, except `event` / `ack`.
 
-## Sınırlar
+## Limits
 
-- Satır başına en fazla 16000 karakter; JSON derinliği en fazla 64.
-- Lua giden kuyruğu 256 satır; sidecar bekleyen cevaplar 500.
-- Aynı anda tek sidecar: veri klasöründeki `sidecar.lock` dosyası kilitlenir.
+- At most 16000 characters per line; JSON depth at most 64.
+- Lua's outgoing queue holds 256 lines; the sidecar's pending replies 500.
+- One sidecar at a time: the `sidecar.lock` file in the data folder is locked.

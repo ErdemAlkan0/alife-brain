@@ -1,6 +1,5 @@
 A-Life Brain {version}
 LLM conversations, long-term memory and trained decisions for Project A-Life NPCs.
-(Türkçesi aşağıda.)
 
 REQUIREMENTS
 - Project Zomboid Build 42.21 or newer, single player (multiplayer is not supported yet).
@@ -23,7 +22,9 @@ PLAY
 2. In the game's mod list enable Project A-Life and A-Life Brain.
 3. Next to an NPC press T, or right-click -> "A-Life Brain: talk to ...". Type and press Enter.
    The game pauses while the conversation window is open. Drag items onto the trade table to trade.
-4. Options -> Mods -> A-Life Brain: pause while talking, keep the NPCs you meet, and let the
+4. The window is in English. Write in the language you like: the NPCs answer in it (English and
+   Turkish both work, and other languages the LLM speaks).
+5. Options -> Mods -> A-Life Brain: pause while talking, keep the NPCs you meet, and let the
    trained policy choose NPC behaviour (off by default).
 Without the sidecar the game and A-Life run as usual; NPCs then use A-Life's own lines.
 
@@ -34,42 +35,3 @@ SETTINGS AND DATA
   "openai" (your key is read from the environment variable named in "openai": "api_key_env";
   never write the key into the file).
 - To remove the mod: turn it off in the mod list and delete Zomboid\mods\ALifeBrain.
-
-------------------------------------------------------------------------------------------------
-
-A-Life Brain {version}
-Project A-Life NPC'leri için yapay zekâ ile sohbet, uzun süreli hafıza ve eğitilmiş kararlar.
-
-GEREKENLER
-- Project Zomboid Build 42.21 veya üstü, tek oyunculu (çok oyunculu henüz desteklenmiyor).
-- Project A-Life (Steam Workshop).
-- Windows 10 ya da 11.
-- Player2 uygulaması (https://player2.game), kurulu ve giriş yapılmış; ücretsiz.
-  Ollama ya da kendi OpenAI anahtarın da olur (AYARLAR'a bak).
-
-KURULUM
-1. ALifeBrain klasörünü %USERPROFILE%\Zomboid\mods\ içine kopyala
-   (sonuç: ...\Zomboid\mods\ALifeBrain\42\mod.info).
-2. https://player2.game/profile/developer adresinden bir Player2 client id al.
-3. ALifeBrainSidecar.exe'ye bir kez çift tıkla. %LOCALAPPDATA%\ALifeBrain\config.json dosyasını
-   oluşturur ve client id'nin eksik olduğunu söyler. Kapat, config.json'ı Not Defteri ile aç ve
-   id'yi şuraya yaz: "player2": { "client_id": "SENIN-ID", ... }
-   Windows bilinmeyen uygulama uyarısı verebilir (exe imzasız): Ek bilgi -> Yine de çalıştır.
-
-OYNAMAK
-1. Önce Player2'yi, sonra ALifeBrainSidecar.exe'yi (penceresi açık kalsın), sonra oyunu başlat.
-2. Oyunun mod listesinde Project A-Life ve A-Life Brain'i aç.
-3. Bir NPC'nin yanında T'ye bas ya da sağ tık -> "A-Life Brain: ... ile konuş". Yaz, Enter'a bas.
-   Sohbet penceresi açıkken oyun durur. Takas için eşyaları takas masasına sürükle.
-4. Seçenekler -> Modlar -> A-Life Brain: konuşurken duraklat, tanıştığın NPC'ler kalsın, NPC
-   davranışını eğitilmiş policy seçsin (varsayılan kapalı).
-Sidecar çalışmıyorsa oyun ve A-Life her zamanki gibi çalışır; NPC'ler A-Life'ın kendi
-repliklerini kullanır.
-
-AYARLAR VE VERİLER
-- Ayarlar, anılar ve loglar %LOCALAPPDATA%\ALifeBrain klasöründe (config.json, memory.sqlite3,
-  sidecar.log). Bütün NPC'lerin seni unutması için bu klasörü sil.
-- Başka sağlayıcı, config.json'da: "provider": "ollama" (yerel Ollama, model "ollama" altında) ya
-  da "openai" (anahtar, "openai": "api_key_env" alanında adı yazan ortam değişkeninden okunur;
-  anahtarı dosyaya yazma).
-- Modu kaldırmak için: mod listesinde kapat ve Zomboid\mods\ALifeBrain klasörünü sil.

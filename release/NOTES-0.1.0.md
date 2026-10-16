@@ -4,8 +4,6 @@ LLM conversations, long-term memory and trained decisions for Project A-Life NPC
 Project A-Life's NPCs talk back in your own words (through Player2, Ollama or your own key), remember what you did,
 trust or fear you for it, and that trust changes how their group treats you.
 
-*Türkçesi aşağıda.*
-
 ## Download
 
 `ALifeBrain-0.1.0.zip`: the mod, the sidecar (`ALifeBrainSidecar.exe`, no Python needed) and `INSTALL.txt`
@@ -42,21 +40,3 @@ SHA-256 `0431E065B9E75DC23EBDF4072768D08A80A65F554980D4C25E81ED53C2EC18CF`
 - Every player needs their own Player2 client id for now.
 - Player2 sometimes refuses a line (HTTP 400) or answers slowly (up to about 40 s); the window says so and
   A-Life's own line is used.
-
----
-
-## Türkçe
-
-Project A-Life NPC'leri için yapay zekâ ile sohbet, uzun süreli hafıza ve eğitilmiş kararlar. NPC'ler yazdığına
-karakterine uygun cevap verir, yaptıklarını hatırlar, sana güvenir ya da korkar; bu güven grubunun sana davranışını
-değiştirir.
-
-**İndir:** `ALifeBrain-0.1.0.zip` (mod, Python istemeyen `ALifeBrainSidecar.exe` ve İngilizce/Türkçe `INSTALL.txt`).
-SHA-256 yukarıda.
-
-**Gerekenler:** Project Zomboid B42.21+, tek oyunculu; Project A-Life (1.3.15 ile denendi); Windows 10/11; giriş
-yapılmış Player2 uygulaması ve kendi Player2 client id'n (ya da Ollama / kendi OpenAI anahtarın).
-
-**Bilinen sınırlar:** deneme sürümü, önce yeni bir kayıtta dene. Exe imzasız, Windows uyarabilir (Ek bilgi -> Yine de
-çalıştır). Her oyuncunun şimdilik kendi Player2 client id'si gerekiyor. Player2 bazen bir cümleyi reddeder ya da geç
-cevap verir; pencere bunu yazar ve A-Life'ın kendi repliği kullanılır.

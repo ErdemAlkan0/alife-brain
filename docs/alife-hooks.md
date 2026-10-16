@@ -1,106 +1,110 @@
-# A-Life hook noktaları (inceleme notları)
+# A-Life hook points (study notes)
 
-İncelenen sürüm: **Project A-Life v1.3.15** (`modversion=1.3.15`, `versionMin=42.21.0`), oyun **42.21.0**.
-Konum: `C:\Users\ERDEM\Zomboid\mods\ProjectALifeNPCs\42.20\media\lua\` (Steam workshop değil, elle kurulmuş;
-CLAUDE.md'deki `workshop/content/108600/3803984183` yolu bu makinede yok).
+Version studied: **Project A-Life v1.3.15** (`modversion=1.3.15`, `versionMin=42.21.0`), game **42.21.0**.
+Location: `C:\Users\ERDEM\Zomboid\mods\ProjectALifeNPCs\42.20\media\lua\` (not the Steam workshop, installed by hand;
+the `workshop/content/108600/3803984183` path in CLAUDE.md does not exist on this machine).
 
-Aşağıdaki dosya yolları bu klasöre görelidir. A-Life güncellenince bu belgeyi ve `ALifeBrainHooks.lua` dosyasını
-birlikte gözden geçir.
+The file paths below are relative to this folder. When A-Life is updated, review this document and
+`ALifeBrainHooks.lua` together.
 
 ---
 
-## 1. Genel yapı
+## 1. Overall structure
 
-- Tüm kod `ProjectALife` global tablosu altında: `ProjectALife.DecisionLoop`, `ProjectALife.ModuleRegistry`,
+- All code lives under the `ProjectALife` global table: `ProjectALife.DecisionLoop`, `ProjectALife.ModuleRegistry`,
   `ProjectALife.ActorRegistry`, `ProjectALife.Talk`, `ProjectALife.Speech`, `ProjectALife.Relations`,
   `ProjectALife.Reputation`, `ProjectALife.Watchdog` ...
-- Karar, konuşma, itibar **server** klasöründe (`server/ProjectALife/...`). SP'de client+shared+server aynı Lua VM'de
-  çalışır, yani hepsine doğrudan erişilir. MP istemcisinde server tabloları **yok** (istemci yalnızca
-  `MirrorTransport`/`sendServerCommand` ile gelen kopyaları görür).
-- Başlatma: `server/ProjectALife/Core/ALifeServerBootstrap.lua` → `OnGameStart`/`OnServerStarted` içinde
-  `Runtime.safeStart(...)`, her `OnTick` içinde `Runtime.tick()`. Bizim kancalarımızı **`OnGameStart` sonrasında**
-  kurmak en güvenlisi (A-Life tabloları o anda dolu).
-- A-Life sık sık `pcall` + `type(x) == "function"` korumasıyla birbirini çağırıyor; biz de aynısını yapmalıyız.
+- Decisions, talk and reputation are in the **server** folder (`server/ProjectALife/...`). In SP, client + shared +
+  server run in the same Lua VM, so all of it can be reached directly. On an MP client the server tables are **not
+  there** (the client only sees copies that arrive through `MirrorTransport` / `sendServerCommand`).
+- Startup: `server/ProjectALife/Core/ALifeServerBootstrap.lua` -> `Runtime.safeStart(...)` in
+  `OnGameStart` / `OnServerStarted`, `Runtime.tick()` in every `OnTick`. Installing our hooks **after `OnGameStart`**
+  is safest (A-Life's tables are filled by then).
+- A-Life calls its own parts with `pcall` + `type(x) == "function"` guards all the time; we should do the same.
 
-## 2. NPC kimliği
+## 2. NPC identity
 
-NPC = zombi gövdesi ("shell") + kayıt ("actor record").
+NPC = a zombie body ("shell") + a record ("actor record").
 
-| Nerede | Alan | Not |
+| Where | Field | Note |
 |---|---|---|
-| `shell:getModData()` | `ProjectALifeOwned == true` | A-Life NPC'si mi? (CLAUDE.md'deki kontrol doğru) |
-| | `ProjectALifeUID` | Kalıcı kimlik, ör. `"palife:<ms>:<seq>"` (≤ 64 karakter) |
-| | `ProjectALifeGeneration` | Gövde yeniden yaratıldıkça artar; `uid + generation` birlikte doğrulanmalı |
-| | `ProjectALifeFactionId`, `ProjectALifeProfileId` | Fraksiyon ve profil |
-| | `ProjectALifeActivity`, `ProjectALifeIntent` | Kayıttaki aktivite/niyetin yansıması |
-| | `ProjectALifeBehaviorState`, `ProjectALifeBehaviorIntent` | **Karar döngüsünün o anki durumu** (her `think` sonunda `stampState` yazar) |
-| `shell:GetVariable(...)` | `ALifeActor`, `ALifeUID`, `ALifeGeneration` | Aynı bilgilerin animasyon değişkeni kopyası |
+| `shell:getModData()` | `ProjectALifeOwned == true` | Is it an A-Life NPC? (the check in CLAUDE.md is right) |
+| | `ProjectALifeUID` | Lasting id, e.g. `"palife:<ms>:<seq>"` (<= 64 characters) |
+| | `ProjectALifeGeneration` | Grows every time the body is recreated; check `uid + generation` together |
+| | `ProjectALifeFactionId`, `ProjectALifeProfileId` | Faction and profile |
+| | `ProjectALifeActivity`, `ProjectALifeIntent` | Mirror of the record's activity / intent |
+| | `ProjectALifeBehaviorState`, `ProjectALifeBehaviorIntent` | **The decision loop's current state** (`stampState` writes it after every `think`) |
+| `shell:GetVariable(...)` | `ALifeActor`, `ALifeUID`, `ALifeGeneration` | Animation-variable copy of the same information |
 
-Yardımcılar:
-- `ProjectALife.Speech.variable(shell, "ALifeUID")` → önce modData `ProjectALifeUID`, yoksa `GetVariable`.
-- `ProjectALife.ShellAdapter.shellIdentity(shell)` → `uid, generation`.
-- `ProjectALife.Watchdog.bindings[uid].shell` → uid'den gövdeye (yalnızca otorite tarafında).
-- `ProjectALife.Speech.findShell(uid)` → istemcide de çalışan yavaş yol (hücredeki zombi listesini tarar).
+Helpers:
+- `ProjectALife.Speech.variable(shell, "ALifeUID")` -> modData `ProjectALifeUID` first, `GetVariable` otherwise.
+- `ProjectALife.ShellAdapter.shellIdentity(shell)` -> `uid, generation`.
+- `ProjectALife.Watchdog.bindings[uid].shell` -> from uid to body (on the authority side only).
+- `ProjectALife.Speech.findShell(uid)` -> the slow path that also works on the client (scans the cell's zombie list).
 
-## 3. Aktör kaydı — `server/ProjectALife/Core/ALifeActorRegistry.lua`
+## 3. Actor registry: `server/ProjectALife/Core/ALifeActorRegistry.lua`
 
-Kayıt alanları: `uid`, `revision`, `generation`, `lifecycle` (`dormant|spawning|active|dead`), `profileId`,
-`factionId`, `worldPosition {x,y,z}`, `activity`, `intent`, `memory` (serbest tablo).
+Record fields: `uid`, `revision`, `generation`, `lifecycle` (`dormant|spawning|active|dead`), `profileId`,
+`factionId`, `worldPosition {x,y,z}`, `activity`, `intent`, `memory` (a free table).
 
-Önemli `memory` alanları: `groupId` (squad), `outpostId`, `supportForGroupId`, `behaviorProfile`, `conduct`,
+Important `memory` fields: `groupId` (squad), `outpostId`, `supportForGroupId`, `behaviorProfile`, `conduct`,
 `moduleOverrides`, `spawnStance`, `hostileOverride`, `hostileToPlayerKeys`, `hostileToActorKeys`,
 `carefulPlayerKeys`, `tolerateUntil`, `robbery`, `robberyTruce`, `talkHoldUntilMs`, `talkHoldPlayerKey`.
 
 API:
-- `Registry.read(uid)` → kopya, `Registry.peek(uid)` → canlı kayıt (değiştirme!), `Registry.each(fn)`.
-- `Registry.update(uid, revision, mutate)` / `updateTransient(...)` / `updateMany(uids, mutate)` — iyimser kilit
-  (`revision` uyuşmazsa reddeder). `memory` yazmak için `ProjectALife.Talk.writeMemory(uid, fn)` hazır bir sarmalayıcı.
+- `Registry.read(uid)` -> a copy, `Registry.peek(uid)` -> the live record (do not change it!), `Registry.each(fn)`.
+- `Registry.update(uid, revision, mutate)` / `updateTransient(...)` / `updateMany(uids, mutate)`: optimistic locking
+  (refused when `revision` does not match). `ProjectALife.Talk.writeMemory(uid, fn)` is a ready wrapper for writing
+  `memory`.
 
-## 4. Karar döngüsü — `server/ProjectALife/Decisions/ALifeDecisionLoop.lua`
+## 4. Decision loop: `server/ProjectALife/Decisions/ALifeDecisionLoop.lua`
 
-- `Decisions.tick(budget)` her tick'te zaman bütçesi (12 ms) içinde aktörleri dolaşır. Oyuncuya yakın (≤ 45 kare)
-  aktörler 150 ms'de bir, uzaktakiler (> 110) 1.5 s'de bir düşünür.
-- `Decisions.think(uid, now)` → `update(actor, shell, state, now)` → gerekirse `decide(...)` → yeni durum
-  `Decisions.states[uid]` içine yazılır ve gövdeye damgalanır.
-- **Durum (state) şekli:** `{ kind, intent, cooldownUntilMs, action?, threat?, threatKind?, ... }`
+- `Decisions.tick(budget)` walks the actors within a time budget (12 ms) every tick. Actors close to a player
+  (<= 45 tiles) think every 150 ms, far ones (> 110) every 1.5 s.
+- `Decisions.think(uid, now)` -> `update(actor, shell, state, now)` -> `decide(...)` when needed -> the new state is
+  written into `Decisions.states[uid]` and stamped onto the body.
+- **State shape:** `{ kind, intent, cooldownUntilMs, action?, threat?, threatKind?, ... }`
   - `kind`: `idle | movement | combat | retreat | recovering | scavenging`
-  - `intent`: serbest metin, ör. `patrol`, `regroup`, `search`, `investigate`, `retreat`, `hold`, `scan`,
+  - `intent`: free text, e.g. `patrol`, `regroup`, `search`, `investigate`, `retreat`, `hold`, `scan`,
     `engage_threat`, `manhunt_player`, `hunt_nearby`, `hold_pressure`, `robbery_pending`, `recover_endurance` ...
-- `decideInternal` sırası:
-  1. `Perception.findThreat` → tehdit varsa `respondToThreat`:
+- `decideInternal` order:
+  1. `Perception.findThreat` -> with a threat, `respondToThreat`:
      **`Modules.evaluate("response", actor, shell, ctx)`** (ctx: `now, threat, threatKind, startRetreat,
-     startMovement, setActivity, persistMemory`) → sonuç yoksa `Combat.canEngage` → `startCombat`.
-  2. Destek çağrısı (`Programs.supportDestination`), ortam replikleri.
+     startMovement, setActivity, persistMemory`) -> without a result `Combat.canEngage` -> `startCombat`.
+  2. A support call (`Programs.supportDestination`), ambient lines.
   3. **`Modules.evaluate("decision", actor, shell, ctx)`** (ctx: `now, threat, threatKind, mode, factionProgram,
      orders, defaults, setActivity, startMovement, orderedTarget, persistMemory`).
-  4. Son görülen konum araması, ses/ipucu araştırması, `Programs.destination` (devriye/dolaşma), yoksa `idle/hold`.
-- Oyuncu emirleri (açık API): `Decisions.setOrder(uid, generation, { kind = "follow"|"hold"|"patrol",
-  player = <IsoPlayer>, anchor = {x,y,z}, untilMs?, quiet? })`. `follow` intent'i için doğrudan kullanılabilir.
-- `Decisions.refreshDirective(uid)` → mevcut hareket/idle durumunu iptal edip yeniden karar verdirir.
-- `Decisions.traceDecisions = true` olursa her karar `Telemetry.emit("decision_trace", {uid, kind, intent})` üretir.
-- **Uygulandı (3. aşama):** `Registry.evaluate(kind, ...)` kazanan durumla birlikte **modül id'sini** de döndürür
-  (`return result, module.id`), karar döngüsü id'yi atar. Döngü `local Modules = ProjectALife.ModuleRegistry` tuttuğu
-  için fonksiyon her çağrıda tablodan okunur; `Hooks.installDecisionTap` `ModuleRegistry.evaluate`'i sarmalar, yalnızca
-  `only == nil` olan tam zincir çalışmalarını (`decision`, `response`) izler ve sonucu değiştirmeden döndürür. Etiket =
-  modül id'si ya da `default` (zincir boş döndü, A-Life'ın kendi akışı). İzinli modüller (eylem maskesi):
-  `Registry.order` içinde `dispatch == kind` olanlar ve `Registry.allows(actor, id)`.
-- **Uygulandı (5. aşama):** aynı sarmalayıcı (`Hooks.wrapEvaluate`), policy kontrolü açıkken tam zincirden **önce**
-  `Hooks.decisionChooser`'a (`Control.pick`) sorar; bir modül id'si dönerse o modül tek başına (`only`) çalışır,
-  `nil` dönerse (yapacak işi yok) ya da seçim yoksa A-Life'ın zinciri eskisi gibi çalışır. Modüller `evaluate`
-  içinde hareket başlatır, animasyon/ses çalar, belleğe yazar (`context.startMovement`, `persistMemory`; ör.
-  `Search.evaluate`): bu yüzden zincir önce çalıştırılıp sonucu sonradan değiştirilemez. Policy'nin seçtiği kararlar
-  `chosen = true` ile bildirilir, BC verisine girmez. A-Life'ın kendi lull çağrıları (`only` dolu) olduğu gibi geçer.
-  `Hooks.orderOf(uid)` (`DecisionLoop.orders`), `Hooks.nearestPlayer(shell)` ve `Hooks.stance` Control'ün "A-Life'a
-  bırak" kararları için. Mesafeler A-Life'tan: `ModuleCareful.settings.warnRadius` 14 (`memory.carefulRadii` ve
-  senaryolu karşılaşmalar değiştirebilir), `ModuleTalkPresence.courtesyTiles` 6, `ModuleRobbery.detectRadius` 55.
-- Gözlem kaynakları (`Hooks.decisionObservation`): gövde modData'sı (§9), `context.threat/threatKind`,
-  `Perception.zombieSnapshot` (algı her 200 ms'de yeniler: `bodies` = sıradan zombiler, `actors` = A-Life gövdeleri,
-  ikisi de `{body, x, y, z}`; algı çalışmadan önce `nil`), `ActorRegistry.peek(uid).memory.groupId` (squad),
-  `DecisionLoop.states/orders`, `Talk.stance`, en yakın oyuncu.
+  4. A search of the last seen position, an investigation of a sound / clue, `Programs.destination` (patrol /
+     wandering), otherwise `idle/hold`.
+- Player orders (a public API): `Decisions.setOrder(uid, generation, { kind = "follow"|"hold"|"patrol",
+  player = <IsoPlayer>, anchor = {x,y,z}, untilMs?, quiet? })`. Usable directly for the `follow` intent.
+- `Decisions.refreshDirective(uid)` -> cancels the current movement / idle state and makes it decide again.
+- With `Decisions.traceDecisions = true` every decision emits `Telemetry.emit("decision_trace", {uid, kind, intent})`.
+- **Implemented (phase 3):** `Registry.evaluate(kind, ...)` returns the **module id** together with the winning state
+  (`return result, module.id`), and the decision loop drops the id. The loop holds
+  `local Modules = ProjectALife.ModuleRegistry`, so the function is read from the table on every call;
+  `Hooks.installDecisionTap` wraps `ModuleRegistry.evaluate`, watches only full chain runs with `only == nil`
+  (`decision`, `response`) and returns the result unchanged. Label = the module id or `default` (the chain returned
+  nothing, A-Life's own flow). Allowed modules (action mask): those in `Registry.order` with `dispatch == kind` and
+  `Registry.allows(actor, id)`.
+- **Implemented (phase 5):** while policy control is on, the same wrapper (`Hooks.wrapEvaluate`) asks
+  `Hooks.decisionChooser` (`Control.pick`) **before** the full chain; when it returns a module id, that module runs
+  alone (`only`); when it returns `nil` (nothing to do), or there is no choice, A-Life's chain runs as before. Modules
+  start movement, play animations / voices and write memory inside `evaluate` (`context.startMovement`,
+  `persistMemory`; e.g. `Search.evaluate`): that is why the chain cannot run first and its result be changed
+  afterwards. The decisions the policy chose are reported with `chosen = true` and stay out of the BC data. A-Life's
+  own lull calls (`only` set) pass through as they are. `Hooks.orderOf(uid)` (`DecisionLoop.orders`),
+  `Hooks.nearestPlayer(shell)` and `Hooks.stance` serve Control's "leave it to A-Life" decisions. Distances from
+  A-Life: `ModuleCareful.settings.warnRadius` 14 (`memory.carefulRadii` and scripted encounters may change it),
+  `ModuleTalkPresence.courtesyTiles` 6, `ModuleRobbery.detectRadius` 55.
+- Observation sources (`Hooks.decisionObservation`): the body's modData (§9), `context.threat/threatKind`,
+  `Perception.zombieSnapshot` (perception refreshes it every 200 ms: `bodies` = plain zombies, `actors` = A-Life
+  bodies, both `{body, x, y, z}`; `nil` before perception runs), `ActorRegistry.peek(uid).memory.groupId` (squad),
+  `DecisionLoop.states/orders`, `Talk.stance`, the nearest player.
 
-## 5. Modül kaydı — `shared/ProjectALife/Behaviours/ALifeModuleRegistry.lua` (RL kancası)
+## 5. Module registry: `shared/ProjectALife/Behaviours/ALifeModuleRegistry.lua` (the RL hook)
 
-Bu, A-Life'ın **kendi eklenti noktası**; RL kararını monkey-patch olmadan enjekte etmenin en temiz yolu.
+This is A-Life's **own extension point**; the cleanest way to inject an RL decision without monkey-patching.
 
 ```lua
 ProjectALife.ModuleRegistry.register({
@@ -109,243 +113,254 @@ ProjectALife.ModuleRegistry.register({
 })
 ```
 
-- `Registry.evaluate(kind, actor, shell, ctx, only)` zinciri **öncelik numarası küçükten büyüğe** dener; ilk `nil`
-  olmayan sonuç kazanır. `nil` dönersek A-Life normal akışına devam eder → sidecar/policy yoksa sorunsuz geri düşüş.
-- `only` parametresi tek bir modülü çalıştırır: `Registry.evaluate("decision", actor, shell, ctx, "regroup")`.
-  **RL aksiyonu = A-Life modül id'si** olarak tasarlanabilir; policy bir id seçer, biz o modülü `only` ile çağırırız.
-- **Engel:** `Registry.allows()` → `BehaviorProfiles.allows(actor, id)` yalnızca profilin `overlays` tablosundaki
-  id'lere izin veriyor. Bilinmeyen id'li modülümüz **hiç çalışmaz**. Seçenekler:
-  - (a) `ProjectALife.BehaviorProfiles.definitions[i].overlays.alifeBrain = true` (çalışma zamanında tablo eklemesi,
-    A-Life dosyası değişmez) — önerilen; `ALifeBrainHooks.lua` içinde tutulacak.
-  - (b) Her aktörün `memory.moduleOverrides.alifeBrain = "on"` yazmak (kayıt verisini kirletir, önerilmez).
-  - (c) A-Life ekibinden "dış modüller için profil whitelist'i" istemek (Discord sorusu).
-- Mevcut öncelikler (küçük = önce): `robbery` 3, `talk` 4, `careful` 5, `orders` 10, `flee` 30, `stealth` 30,
+- `Registry.evaluate(kind, actor, shell, ctx, only)` tries the chain **from the smallest priority number to the
+  largest**; the first non-`nil` result wins. If we return `nil`, A-Life goes on with its normal flow -> a clean
+  fallback when there is no sidecar / policy.
+- The `only` parameter runs a single module: `Registry.evaluate("decision", actor, shell, ctx, "regroup")`.
+  **RL action = an A-Life module id** is a possible design; the policy picks an id and we call that module with `only`.
+- **Obstacle:** `Registry.allows()` -> `BehaviorProfiles.allows(actor, id)` allows only the ids in the profile's
+  `overlays` table. A module with an unknown id **never runs**. Options:
+  - (a) `ProjectALife.BehaviorProfiles.definitions[i].overlays.alifeBrain = true` (a table addition at run time, no
+    A-Life file changes): recommended; kept in `ALifeBrainHooks.lua`.
+  - (b) Writing `memory.moduleOverrides.alifeBrain = "on"` for every actor (pollutes the record data, not
+    recommended).
+  - (c) Asking the A-Life team for a "profile whitelist for external modules" (a Discord question).
+- Current priorities (smaller = earlier): `robbery` 3, `talk` 4, `careful` 5, `orders` 10, `flee` 30, `stealth` 30,
   `panic` 34, `radioman` 35, `sniper` 38, `warning` 40, `ambusher` 42, `withdraw` 45, `cover` 50, `weave` 55,
   `strafe`/`doorstack` 60, `fortify` 78, `nightHold` 79, `medic` 85, `healing` 90, `cqbsweep`/`patrolRest` 92,
   `stance` 95, `investigate` 100, `regroup` 110, `search` 117, `scavenge` 118, `idleLife` 140, `spread` 150,
-  `groupMarch` 200, diğerleri 500.
-  - Önerim: RL modülü `robbery`/`talk`/`careful`'dan **sonra** (ör. `priority = 8`) gelsin; soygun ve konuşma
-    sahnelerini bozmasın.
+  `groupMarch` 200, others 500.
+  - Suggestion: the RL module comes **after** `robbery` / `talk` / `careful` (e.g. `priority = 8`), so it does not
+    break robbery and conversation scenes.
 
-### RL aksiyon adayları (modül id → dispatch)
+### RL action candidates (module id -> dispatch)
 
-| Kanal | Modüller |
+| Channel | Modules |
 |---|---|
-| `decision` (tehdit yokken) | `orders`, `careful`, `robbery`, `talk`, `fortify`, `nightHold`, `cqbsweep`, `medic`, `healing`, `patrolRest`, `stance`, `investigate`, `regroup`, `search`, `scavenge`, `idleLife`, `spread`, `groupMarch` |
-| `response` (tehdit varken) | `flee`, `panic`, `radioman` (+ varsayılanı `reaction` olan diğerleri) |
-| `positioning` (çatışma içi) | `stealth`, `sniper`, `ambusher`, `weave`, `cover`, `withdraw` |
+| `decision` (no threat) | `orders`, `careful`, `robbery`, `talk`, `fortify`, `nightHold`, `cqbsweep`, `medic`, `healing`, `patrolRest`, `stance`, `investigate`, `regroup`, `search`, `scavenge`, `idleLife`, `spread`, `groupMarch` |
+| `response` (with a threat) | `flee`, `panic`, `radioman` (+ others whose default is `reaction`) |
+| `positioning` (inside combat) | `stealth`, `sniper`, `ambusher`, `weave`, `cover`, `withdraw` |
 
-Not: `stealth`, `sniper`, `medic`, `ambusher`, `leader` **primary** modüller; yalnızca `memory.conduct` o id ise
-çalışır. Ayrıca `kind = "doctrine"`/`"craft"` olup `dispatch` verilmeyenler hiçbir zincire girmez (başka yerden
-çağrılıyorlar). Bu tablo ilk RL aksiyon uzayı için başlangıç; CLAUDE.md'deki "devriye, baskın, bölge tutma, uyarma,
-soyma, yeniden toplanma" ile eşleme: devriye → `patrolRest`/varsayılan program, bölge tutma → `fortify`/`nightHold`,
-uyarma → `careful`, soyma → `robbery`, yeniden toplanma → `regroup`, baskın → `ModuleBreach` (`doorstack`/`cqbsweep`).
+Note: `stealth`, `sniper`, `medic`, `ambusher`, `leader` are **primary** modules; they run only when `memory.conduct` is
+that id. Modules with `kind = "doctrine"` / `"craft"` and no `dispatch` join no chain at all (they are called from
+elsewhere). This table is the starting point of the first RL action space; mapped to "patrol, raid, hold an area, warn,
+rob, regroup" in CLAUDE.md: patrol -> `patrolRest` / the default program, hold an area -> `fortify` / `nightHold`,
+warn -> `careful`, rob -> `robbery`, regroup -> `regroup`, raid -> `ModuleBreach` (`doorstack` / `cqbsweep`).
 
-### Takipçi tehdit davranışı (oyunda görüldü, 2026-10-09)
+### Follower threat behaviour (seen in game, 2026-10-09)
 
-- `decideInternal` önce `findThreat` → `respondToThreat` çalıştırır; emir (`orders`) yalnızca tehdit yoksa devreye
-  girer. Takip emrinin tasması yok (`Combat.leashFor` yalnızca `memory.stance` / `garrisonPost` olan nöbetçiler için).
-  Sonuç: takipçi gördüğü her zombiye saldırır (Grace, yakın dövüş, 25 zombiye daldı).
-- Zombiye karşı A-Life'ın tek geri çekilmesi `flee` modülü (`Fear/ALifeModuleSurvival.lua`): can ≤
-  `Survival.retreatHealth` (~0,35). Fraksiyon üyelerinde `flee` profile göre kapalı olabilir (Grace'te yalnızca
-  `panic` vardı).
-- `interruptPassiveState`: `idle` / `movement` / `scavenging` / `recovering` durumları tehdit görüldükçe (son
-  taramada tehdit varsa her düşünmede) kesilir ve yeniden tepki verilir; `retreat` durumları kesilmez.
-- **Uygulandı:** `Hooks.installCompanionModule` → `alifeBrainCompanion` (`kind = "reaction"`, `dispatch = "response"`,
-  öncelik 32: `flee` 30 ile `panic` 34 arası). Profil izni için id çalışma zamanında her
-  `BehaviorProfiles.definitions[i].overlays` tablosuna eklenir (kayda yazılmaz; 30 s'de bir yeni profiller için
-  tekrarlanır). Yalnızca oyuncu takip emri (`DecisionLoop.orders[uid].kind == "follow"`, `source ~= "leader"`) ve zombi
-  tehdidinde karar verir (`Companion.lua`); oyuncuya dönüş `context.startMovement(..., { kind = "retreat" })` ile
-  (kesilmesin diye), uzaklaşma A-Life'ın `context.startRetreat`'i ile.
+- `decideInternal` runs `findThreat` -> `respondToThreat` first; an order (`orders`) applies only without a threat. A
+  follow order has no leash (`Combat.leashFor` is only for guards with `memory.stance` / `garrisonPost`).
+  Result: a follower attacks every zombie it sees (Grace, in melee, charged into 25 zombies).
+- A-Life's only retreat from zombies is the `flee` module (`Fear/ALifeModuleSurvival.lua`): health <=
+  `Survival.retreatHealth` (~0.35). For faction members `flee` may be off by profile (Grace had only `panic`).
+- `interruptPassiveState`: `idle` / `movement` / `scavenging` / `recovering` states are interrupted while threats are
+  seen (on every think when the last scan had a threat) and it reacts again; `retreat` states are not interrupted.
+- **Implemented:** `Hooks.installCompanionModule` -> `alifeBrainCompanion` (`kind = "reaction"`,
+  `dispatch = "response"`, priority 32: between `flee` 30 and `panic` 34). For the profile permission the id is added
+  at run time to every `BehaviorProfiles.definitions[i].overlays` table (not saved; repeated every 30 s for new
+  profiles). It decides only for a player follow order (`DecisionLoop.orders[uid].kind == "follow"`,
+  `source ~= "leader"`) and a zombie threat (`Companion.lua`); returning to the player goes through
+  `context.startMovement(..., { kind = "retreat" })` (so it is not interrupted), moving away through A-Life's
+  `context.startRetreat`.
 
-### Gizli takip, NPC uyarıları, pazarlık (oyunda görüldü / istendi, 2026-10-09)
+### Sneaking with the player, NPC warnings, parley (seen in game / requested, 2026-10-09)
 
-- **Hız:** `orders` modülü takibi hızsız başlatır → `Movement` `walk`. `run` istenince `resolvePace` 14 s'de bir
-  650 ms koşu penceresi verir (tehlike duruşunda sürekli koşu) → "kısa koşular". Dünyaya ses yalnızca ateşli silah
-  atışı üretir (`Combat.worldNoise`); `Voice.play` dünya sesi üretmez.
-- **Eğilme:** `AIFence` her karede `Stealth.stanceActive(modData)` sonucunu `ALifeSneak` animasyon değişkenine ve
-  `ProjectALifeSneakActive`'e yazar (yürüme ×0,85, sprint koşuya iner, sırttan saldırı çarpanı). Yalnızca
-  `ProjectALifeConduct == "stealth"` NPC'ler için açık. **Uygulandı:** `Hooks.wrapStealthStance` oyuncusu eğilen
-  takipçileri ekler (`Companion.sneakers`, 0,5 s'de bir `DecisionLoop.orders`'tan).
-- **Uyarı merdiveni:** `ModuleCareful` (karar zinciri, öncelik 5) yalnızca oyunculara uyarır (`CAREFUL_KEEP_BACK` →
-  `CAREFUL_LAST_WARNING` → `CAREFUL_HOSTILE`, fraksiyon sesleri `Audio/ALifeFactionVoiceStyles.lua`);
-  `Careful.evaluateActor` hep `nil`. **Uygulandı:** `alifeBrainStandoff` aynı merdiveni NPC↔NPC için uygular.
-- **Ateşkes:** `memory.robberyTruce[Reputation.playerKey(player)] = untilMs` iken `Relations.hostileToPlayer` false
-  döner (görünen tutum `playerStance` yine "hostile"). A-Life bunu soygundan sonra kullanır; `memory.robbery`
-  etkinken de ekip oyuncuyu tehdit saymaz. **Uygulandı:** pazarlık ekibe 6 s'lik ateşkes yazar ve 2 s'de bir
-  yeniler; barışta uzun ateşkes, çatışmada silinir + `DecisionLoop.refreshDirective`.
-- **A-Life'ın soygunu** (`ModuleRobbery`): yalnızca haydut/çete kayıtlı, en az 2 kişilik, silahlı ekipler; kendi
-  taraması (55 kare) tehdit tepkisinden önce başlar. Pazarlık, soygun etkinken (`memory.robbery`) devreye girmez.
+- **Speed:** the `orders` module starts a follow without a speed -> `Movement` `walk`. When `run` is asked,
+  `resolvePace` grants a 650 ms run window every 14 s (constant running in a danger stance) -> "short runs". Only
+  firearm shots make world noise (`Combat.worldNoise`); `Voice.play` makes none.
+- **Crouching:** every frame `AIFence` writes the result of `Stealth.stanceActive(modData)` into the `ALifeSneak`
+  animation variable and `ProjectALifeSneakActive` (walking ×0.85, sprint drops to a run, a backstab multiplier). On
+  only for NPCs with `ProjectALifeConduct == "stealth"`. **Implemented:** `Hooks.wrapStealthStance` adds followers
+  whose player crouches (`Companion.sneakers`, from `DecisionLoop.orders` every 0.5 s).
+- **Warning ladder:** `ModuleCareful` (decision chain, priority 5) warns players only (`CAREFUL_KEEP_BACK` ->
+  `CAREFUL_LAST_WARNING` -> `CAREFUL_HOSTILE`, faction voices in `Audio/ALifeFactionVoiceStyles.lua`);
+  `Careful.evaluateActor` is always `nil`. **Implemented:** `alifeBrainStandoff` applies the same ladder NPC<->NPC.
+- **Truce:** while `memory.robberyTruce[Reputation.playerKey(player)] = untilMs`, `Relations.hostileToPlayer` returns
+  false (the visible stance `playerStance` is still "hostile"). A-Life uses it after a robbery; while `memory.robbery`
+  is active the crew does not count the player as a threat either. **Implemented:** a parley writes a 6 s truce to the
+  crew and renews it every 2 s; a long truce on peace, cleared on a fight + `DecisionLoop.refreshDirective`.
+- **A-Life's robbery** (`ModuleRobbery`): only crews registered as bandits / gangs, at least 2 strong and armed; its own
+  scan (55 tiles) starts before the threat response. A parley does not start while a robbery is active
+  (`memory.robbery`).
 
-## 6. Konuşma sistemi (LLM kancası)
+## 6. Talk system (the LLM hook)
 
-Akış (SP):
-1. `client/.../Talk/ALifeTalkInput.lua`: sohbet tuşu → kendi metin kutusu (`Input.open`) veya vanilla sohbet
-   sarmalayıcısı (`processSayMessage`/`processShoutMessage`). `!` ile başlayan metin = bağırma.
-2. `Input.deliver("talkSay", {text, loud})` → SP'de doğrudan `Talk.onPlayerText(player, text, loud)`, MP'de
+Flow (SP):
+1. `client/.../Talk/ALifeTalkInput.lua`: the chat key -> its own text box (`Input.open`) or the vanilla chat wrapper
+   (`processSayMessage` / `processShoutMessage`). Text starting with `!` = a shout.
+2. `Input.deliver("talkSay", {text, loud})` -> in SP directly `Talk.onPlayerText(player, text, loud)`, in MP
    `sendClientCommand(player, "ProjectALife", "talkSay", args)`.
-3. `server/.../Talk/ALifeTalk.lua` `Talk.onPlayerText`: soygun kelimeleri (`ModuleRobbery.onPlayerWords`) →
-   dinleyiciler (12 kare, bağırınca 25; bakış konisi 60°) → muhatap → **`Talk.respond(player, listener, text, now,
+3. `server/.../Talk/ALifeTalk.lua` `Talk.onPlayerText`: robbery words (`ModuleRobbery.onPlayerWords`) -> listeners
+   (12 tiles, 25 when shouting; a 60° view cone) -> the addressee -> **`Talk.respond(player, listener, text, now,
    choiceIntent)`**.
-4. `Talk.respond`: çatışmadaysa `TALK_BUSY_COMBAT`, düşmansa `TALK_IGNORE_HOSTILE`; değilse
-   `TalkIntents.classify(text)` (anahtar kelime puanlama, eşik 30) → `DialogueData.replies[intent]` havuzundan
-   `Speech.pick` → `Speech.say`.
+4. `Talk.respond`: `TALK_BUSY_COMBAT` in combat, `TALK_IGNORE_HOSTILE` when hostile; otherwise
+   `TalkIntents.classify(text)` (keyword scoring, threshold 30) -> `Speech.pick` from the
+   `DialogueData.replies[intent]` pool -> `Speech.say`.
 
-**LLM için kanca noktası:** `Talk.respond`. Plan: yalnızca serbest metin (`choiceIntent == nil`), çatışma dışı ve
-düşman olmayan durumlarda araya gir:
-- `Talk.hold(record, shell, player, now, ms)` → NPC durur ve oyuncuya döner (bekleme süresince tekrarla).
-- `Speech.say(shell, "...", { face = player })` → bekleme balonu.
-- Cevap gelince `Speech.say(shell, reply, { face = player })`; zaman aşımında orijinal `Talk.respond` çağrılır
-  (hazır replik geri dönüşü).
-- Bu bir fonksiyon sarmalaması (wrap); `ALifeBrainHooks.lua` içinde tutulacak ve orijinal referans saklanacak.
-- **Uygulandı (2. aşama):** `Hooks.installTalkHook(Dialogue.handle)`; orijinal `Hooks.originalRespond` içinde,
-  geri düşüş `Hooks.respondWithAlife`. Yalnızca tek oyunculu (MP istemcisinde `Talk` tablosu yok).
-- **Araya giren replikler:** `server/.../Behaviours/ALifeModuleTalkPresence.lua` `evaluate`, `memory.talkHoldUntilMs`
-  geçerliyken NPC'yi `talk_hold` durumunda tutar (susar, oyuncuya döner). Tutma bitince oyuncu 5 kare içindeyse
-  `GREET_PLAYER`, 2,5 kare içinde 20 s'den uzun kalırsa `STARE_PLAYER` der; sayaçlar `Presence.greeted[party]` /
-  `Presence.stared[party]`, `party = Presence.partyKey(actor, playerKey)`. Bizim çözüm: pencere açıkken her 2 s
-  `Talk.hold`; kapanınca `Hooks.release` (`Talk.writeMemory` ile tutmayı bırakır) + `Hooks.quietPresence` (iki
-  sayacı 3 dk ileri alır).
-- **Eşya verme:** `server/.../Talk/ALifeTalkSupplies.lua` `Supplies.matches(item, "ASK_WATER"|"ASK_FOOD"|"ASK_MEDS")`
-  A-Life'ın verilebilir eşya kuralları (içilebilir su, bozuk/zehirli olmayan yiyecek, ilk yardım; kuşanılmış değil).
-  Aktarım `shell:getInventory():Remove(item)` + `player:getInventory():AddItem(item)`, MP sunucuda
-  `sendRemoveItemFromContainer` / `sendAddItemToContainer` (Supplies.respond ile aynı).
-- **Takip / bekleme:** `DecisionLoop.setOrder(uid, generation, { kind = "follow", player, untilMs })` ve
-  `{ kind = "hold", anchor, untilMs }`; `orders` modülü (öncelik 10) uygular, tehdit tepkileri yine önce gelir.
-  Etkin emir: `DecisionLoop.orders[uid]`.
+**Hook point for the LLM:** `Talk.respond`. Plan: step in only for free text (`choiceIntent == nil`), outside combat
+and when not hostile:
+- `Talk.hold(record, shell, player, now, ms)` -> the NPC stops and turns to the player (repeat while waiting).
+- `Speech.say(shell, "...", { face = player })` -> the waiting bubble.
+- When the reply comes, `Speech.say(shell, reply, { face = player })`; on a timeout the original `Talk.respond` is
+  called (the canned-line fallback).
+- This is a function wrap; kept in `ALifeBrainHooks.lua` with the original reference saved.
+- **Implemented (phase 2):** `Hooks.installTalkHook(Dialogue.handle)`; the original is in `Hooks.originalRespond`, the
+  fallback is `Hooks.respondWithAlife`. Single player only (there is no `Talk` table on an MP client).
+- **Lines that cut in:** `server/.../Behaviours/ALifeModuleTalkPresence.lua` `evaluate` holds the NPC in the
+  `talk_hold` state while `memory.talkHoldUntilMs` is valid (silent, facing the player). When the hold ends it says
+  `GREET_PLAYER` if the player is within 5 tiles, and `STARE_PLAYER` if they stay within 2.5 tiles for more than 20 s;
+  the counters are `Presence.greeted[party]` / `Presence.stared[party]`, `party = Presence.partyKey(actor, playerKey)`.
+  Our solution: `Talk.hold` every 2 s while the window is open; when it closes, `Hooks.release` (lets go of the hold
+  with `Talk.writeMemory`) + `Hooks.quietPresence` (moves both counters 3 minutes ahead).
+- **Handing items over:** `server/.../Talk/ALifeTalkSupplies.lua` `Supplies.matches(item, "ASK_WATER"|"ASK_FOOD"|
+  "ASK_MEDS")` are A-Life's rules for items it may hand out (drinkable water, food that is not rotten / poisoned, first
+  aid; not equipped). The transfer is `shell:getInventory():Remove(item)` + `player:getInventory():AddItem(item)`, on an
+  MP server `sendRemoveItemFromContainer` / `sendAddItemToContainer` (the same as Supplies.respond).
+- **Follow / wait:** `DecisionLoop.setOrder(uid, generation, { kind = "follow", player, untilMs })` and
+  `{ kind = "hold", anchor, untilMs }`; the `orders` module (priority 10) applies them, threat responses still come
+  first. The active order: `DecisionLoop.orders[uid]`.
 
-Prompt için hazır bağlam:
-- `Speech.contextFor(record, player)` → `role, register, temperament, sex, day, hour, voice, stance`.
-- `Talk.stance(record, player)` → `hostile | careful | neutral | friendly`.
-- `Talk.observations(record, shell, player, now)` → `recent_zombie_contact`, `recent_human_contact`, `player_armed`.
-- `Talk.varsFor(intent, ...)` → `destination`, `town`, `den`, `weapon`.
+Context ready for the prompt:
+- `Speech.contextFor(record, player)` -> `role, register, temperament, sex, day, hour, voice, stance`.
+- `Talk.stance(record, player)` -> `hostile | careful | neutral | friendly`.
+- `Talk.observations(record, shell, player, now)` -> `recent_zombie_contact`, `recent_human_contact`, `player_armed`.
+- `Talk.varsFor(intent, ...)` -> `destination`, `town`, `den`, `weapon`.
 - `Speech.nearestTown(x, y)`, `Speech.clock()`.
 
-Diğer:
-- `Speech.say` server'da `sendServerCommand(player, "ProjectALife", "speech", {uid, text, x, y})` ile 40 kare
-  içindeki oyunculara yayınlar; istemci `Speech.onServerCommand` ile `shell:addLineChatElement` çizer.
-- `ProjectALife.AudioPolicy.caption(text)` metni filtreler/biçimler; `nil` dönerse balon çıkmaz.
-- Menü seçenekleri: `TalkIntents.choices` (ör. `ASK_NEWS`, `ASK_DESTINATION`, `JOIN_REQUEST`, `YES`, `NO`).
-- `Talk.settings.maxTextLength = 200`, komut hız limitleri `Talk.commandIntervalMs` (talkSay 800 ms).
+Other:
+- On the server `Speech.say` broadcasts to players within 40 tiles with `sendServerCommand(player, "ProjectALife",
+  "speech", {uid, text, x, y})`; the client draws `shell:addLineChatElement` in `Speech.onServerCommand`.
+- `ProjectALife.AudioPolicy.caption(text)` filters / formats the text; when it returns `nil` no bubble shows.
+- Menu choices: `TalkIntents.choices` (e.g. `ASK_NEWS`, `ASK_DESTINATION`, `JOIN_REQUEST`, `YES`, `NO`).
+- `Talk.settings.maxTextLength = 200`, command rate limits `Talk.commandIntervalMs` (talkSay 800 ms).
 
-## 7. İlişki ve itibar (RL gözlemi + LLM'in etkileyebileceği kollar)
+## 7. Relations and reputation (RL observation + levers the LLM may move)
 
-- `Relations.playerStance(actor, player)` → `hostile | careful | neutral | friendly` (A-Life "allied"i
-  "friendly"ye indirger). Katmanlar: fraksiyon tabanı (`RelationLayers.towardPlayer`, meslek kaydırması dahil) →
-  `spawnStance` → `Reputation.recordedStatus` (fraksiyon başına kayıtlı durum) → aktör `memory` geçersiz kılmaları.
-- `Relations.status(sourceActor, targetActor)` → NPC↔NPC ilişki.
+- `Relations.playerStance(actor, player)` -> `hostile | careful | neutral | friendly` (A-Life reduces "allied" to
+  "friendly"). Layers: the faction base (`RelationLayers.towardPlayer`, profession shift included) -> `spawnStance` ->
+  `Reputation.recordedStatus` (the status recorded per faction) -> actor `memory` overrides.
+- `Relations.status(sourceActor, targetActor)` -> NPC<->NPC relation.
 - `Reputation` (`ModData "ProjectALife.Reputation.v1"`): `escalate(player, actor, "attack"|"kill"|"provoked")`;
-  `provoked` 24 oyun saati sonra unutulur. Taban tutumu temkinli ya da tarafsız bir fraksiyonun **bir** üyesine vurmak
-  ya da onu öldürmek bütün fraksiyonu oyuncuya kalıcı olarak düşman yapar (`cause = "attack"`, unutulmaz; taban düşman
-  fraksiyonlarda değişmez). `Careful.onHitByPlayer` zaten düşman olan bir ekibe `hostileToPlayerKeys` yazmaz.
-  **Uygulandı (2026-10-14):** `Hooks.parleyBlocked` yalnızca grubun kendi kinini (`hostileToPlayerKeys`) "grudge"
-  sayar; yalnızca fraksiyon itibarından düşman olan ekip pazarlık eder (`feud`, prompt'a `FEUD_RULE`). Oyun testinde
-  26 ekipten 17'si itibar yüzünden tek söz etmeden ateş açmıştı. Görüş: `Talk.lineOfSight` ya da A-Life'ın uyarı
-  görüşü `ModuleCareful.lineOfSight`; ikisi de görmüyorsa NPC 8 s bekler (`Parley.settings.sightWaitMs`). Oyuncunun son
-  2 dk içinde vurduğu grup pazarlık etmez (`Parley.attackedAtMs`).
+  `provoked` is forgotten after 24 game hours. Hitting or killing **one** member of a faction whose base stance is
+  careful or neutral makes the whole faction hostile to the player for good (`cause = "attack"`, never forgotten;
+  factions that are hostile at base do not change). `Careful.onHitByPlayer` writes no `hostileToPlayerKeys` to a crew
+  that is already hostile.
+  **Implemented (2026-10-14):** `Hooks.parleyBlocked` counts only the group's own grudge (`hostileToPlayerKeys`) as
+  "grudge"; a crew hostile only through its faction's reputation parleys (`feud`, `FEUD_RULE` in the prompt). In the
+  play test 17 of 26 crews had opened fire without a word because of the reputation. Sight: `Talk.lineOfSight` or
+  A-Life's warning sight `ModuleCareful.lineOfSight`; when neither sees the player, the NPC waits 8 s
+  (`Parley.settings.sightWaitMs`). A group the player hit in the last 2 minutes does not parley
+  (`Parley.attackedAtMs`).
 
-LLM `trust_delta` / `fear_delta` → A-Life'ta zaten var olan kollar (sınırlı, geri alınabilir olanlar tercih):
+LLM `trust_delta` / `fear_delta` -> levers that already exist in A-Life (prefer limited, reversible ones):
 
-| Kol | Etki | Nasıl |
+| Lever | Effect | How |
 |---|---|---|
-| `memory.tolerateUntil[playerKey] = untilMs` | `careful` → `neutral` | `Talk.tolerate(record, playerKey, untilMs)` (squad'a yayar). **Uygulandı:** `Rapport.lua` (güven ≥ 5) |
-| `memory.carefulPlayerKeys[playerKey] = untilMs` | `neutral/friendly` → `careful` | `Talk.writeMemory` |
-| `memory.hostileToPlayerKeys[playerKey] = true` | → `hostile` | `Talk.writeMemory` (geri dönüşü zor; LLM'e açma) |
-| `Reputation.escalate(...)` | fraksiyon çapında düşmanlık | LLM'e **açma** |
+| `memory.tolerateUntil[playerKey] = untilMs` | `careful` -> `neutral` | `Talk.tolerate(record, playerKey, untilMs)` (spreads to the squad). **Implemented:** `Rapport.lua` (trust >= 5) |
+| `memory.carefulPlayerKeys[playerKey] = untilMs` | `neutral/friendly` -> `careful` | `Talk.writeMemory` |
+| `memory.hostileToPlayerKeys[playerKey] = true` | -> `hostile` | `Talk.writeMemory` (hard to undo; do not open it to the LLM) |
+| `Reputation.escalate(...)` | faction-wide hostility | do **not** open it to the LLM |
 
-`playerKey`: SP'de `"sp:0"`, MP'de kullanıcı adı (`Reputation.playerKey(player)`).
+`playerKey`: `"sp:0"` in SP, the user name in MP (`Reputation.playerKey(player)`).
 
-**Güven → tutum (uygulandı, 2026-10-12):** temkinli tutum yalnızca fraksiyondan gelir; `ModuleCareful`
-(`Behaviours/ALifeModuleCareful.lua`, öncelik 5) 14 karede `CAREFUL_KEEP_BACK`, 9 karede ve oyuncu 0,75 kare daha
-ilerleyince `CAREFUL_LAST_WARNING`, sonra 6 karenin içinde 1,5 s kalınca `turnGroup` (`hostileToPlayerKeys`, ateş)
-yapar; merdiven grup + oyuncu başına, 45 s içeri girilmezse unutulur. Oyun testinde güveni 5–6 olan iki NPC sohbet
-penceresi kapanınca (oyuncu 6 karenin içinde) gruba döndü. `Rapport.lua`: bildiğimiz en güvenen üyesi ≥ 5 olan
-temkinli grup için `Hooks.tolerate` (= `Talk.tolerate`, 10 dk, 5 dk kalınca yenilenir); güven < 3 olunca yalnızca
-bizim yazdığımız değer (`toleratedUntil` eşitse) `now` ile bitirilir. Hemen etki için cevap gelir gelmez de çalışır
-(`Rapport.onReply`, `Dialogue.finish`). `Hooks.groupKey` = Careful'ın `groupOf` (karakol / grup / tek).
+**Trust -> stance (implemented, 2026-10-12):** the careful stance comes from the faction alone; `ModuleCareful`
+(`Behaviours/ALifeModuleCareful.lua`, priority 5) does `CAREFUL_KEEP_BACK` at 14 tiles, `CAREFUL_LAST_WARNING` at
+9 tiles once the player has advanced another 0.75 tiles, then `turnGroup` (`hostileToPlayerKeys`, fire) when the player
+stays within 6 tiles for 1.5 s; the ladder is per group + player and is forgotten when nobody comes inside for 45 s. In
+the play test two NPCs with trust 5-6 turned on the player when the conversation window closed (the player was within
+6 tiles). `Rapport.lua`: for a careful group whose most trusting known member is >= 5, `Hooks.tolerate`
+(= `Talk.tolerate`, 10 minutes, renewed when 5 minutes are left); when trust drops below 3, only the value we wrote
+ourselves (when `toleratedUntil` matches) is ended with `now`. It also runs as soon as a reply arrives, to act at once
+(`Rapport.onReply`, `Dialogue.finish`). `Hooks.groupKey` = Careful's `groupOf` (outpost / group / alone).
 
-## 8. Olay kaynakları (loglama / hafıza / RL veri seti)
+## 8. Event sources (logging / memory / RL dataset)
 
-A-Life'ta genel bir olay yolu yok; `Telemetry.emit` çok az kategoriye sahip (`actor_died`, `decision_trace`,
-`patrol_rest`, runtime hataları). Olayları şu yollarla toplayacağız:
+A-Life has no general event bus; `Telemetry.emit` has very few categories (`actor_died`, `decision_trace`,
+`patrol_rest`, runtime errors). We collect events this way:
 
-| Olay | A-Life içindeki kaynak | Bizim yakalama yöntemimiz |
+| Event | Source inside A-Life | How we catch it |
 |---|---|---|
-| Oyuncu NPC'ye vurdu | `Combat/ALifeHealth.lua Health.onDamage` → `Reputation.onPlayerDamagedActor`, `Talk.onHitByPlayer` | Vanilla `Events.OnHitZombie(zombie, attacker, bodyPart, weapon)` + `ProjectALifeOwned` filtresi; yedek: `modData.ProjectALifeWounds` artış farkı |
-| NPC öldü / öldürüldü | `Core/ALifeLifecycle.lua` (`KillAttribution.resolve`, `Reputation.onPlayerKilledActor`) | Vanilla `Events.OnZombieDead(zombie)` + `zombie:getAttackedBy()`. Dikkat: `Sim.markCorpse` (`shared/.../Shells/ALifeShellSimulation.lua`) ölümde `ProjectALifeOwned`'ı siler ve `ProjectALifeCorpseOf = uid` yazar; `ShellAdapter` temizliği tüm `ProjectALife*` anahtarlarını silebilir. Bizim işleyici hem `ProjectALifeOwned` hem `ProjectALifeCorpseOf`'a bakıyor. |
-| Squad üyesi öldü | aynı | Ölen NPC'nin `memory.groupId`'si → aynı gruptaki aktörlere hafıza kaydı |
-| Soyuldu / soygun | `Behaviours/ALifeModuleRobbery.lua` (`phase`: `spot → demand → search → execute`, `finish`, `take`) | `memory.robbery.phase` farkını yoklama |
-| Oyuncu yardım etti | `Talk.onHelped` (istemci `OnZombieDead` → `talkHelped`) | Vanilla `OnZombieDead` + yakın NPC çatışmadaysa |
-| Yemek/eşya verildi | (A-Life'ta doğrudan yok; `Talk/ALifeTalkSupplies.lua` yalnızca isteme) | Kendi bağlam menümüz/aksiyonumuz (2. aşamada) |
-| Durum/niyet değişimi (BC verisi) | `stampState` → `modData.ProjectALifeBehaviorState/Intent` | Oyuncu yakınındaki NPC'leri belirli aralıklarla örnekle |
-| Stance değişimi | `Relations.playerStance` | Yoklama + fark |
+| The player hit an NPC | `Combat/ALifeHealth.lua Health.onDamage` -> `Reputation.onPlayerDamagedActor`, `Talk.onHitByPlayer` | Vanilla `Events.OnHitZombie(zombie, attacker, bodyPart, weapon)` + a `ProjectALifeOwned` filter; fallback: the growth of `modData.ProjectALifeWounds` |
+| An NPC died / was killed | `Core/ALifeLifecycle.lua` (`KillAttribution.resolve`, `Reputation.onPlayerKilledActor`) | Vanilla `Events.OnZombieDead(zombie)` + `zombie:getAttackedBy()`. Careful: `Sim.markCorpse` (`shared/.../Shells/ALifeShellSimulation.lua`) clears `ProjectALifeOwned` on death and writes `ProjectALifeCorpseOf = uid`; the `ShellAdapter` cleanup may delete every `ProjectALife*` key. Our handler looks at both `ProjectALifeOwned` and `ProjectALifeCorpseOf`. |
+| A squad member died | the same | The dead NPC's `memory.groupId` -> a memory record for the actors in the same group |
+| Robbed / a robbery | `Behaviours/ALifeModuleRobbery.lua` (`phase`: `spot -> demand -> search -> execute`, `finish`, `take`) | Polling for changes of `memory.robbery.phase` |
+| The player helped | `Talk.onHelped` (client `OnZombieDead` -> `talkHelped`) | Vanilla `OnZombieDead` + a nearby NPC in combat |
+| Food / an item was given | (not directly in A-Life; `Talk/ALifeTalkSupplies.lua` only asks) | Our own context menu / action (in phase 2) |
+| State / intent change (BC data) | `stampState` -> `modData.ProjectALifeBehaviorState/Intent` | Sample NPCs near the player at intervals |
+| Stance change | `Relations.playerStance` | Polling + diff |
 
-## 9. RL gözlemi için hazır veriler
+## 9. Data ready for the RL observation
 
-- Can/kanama: `modData.ProjectALifeWounds`, `ProjectALifeBleedOutAtMs`, `ProjectALifeDownedUntilMs`,
+- Health / bleeding: `modData.ProjectALifeWounds`, `ProjectALifeBleedOutAtMs`, `ProjectALifeDownedUntilMs`,
   `ProjectALifeWoundLeg`, `shell:getHealth()`; `ProjectALifeMaximumHealth`.
-- Mermi/silah: `ProjectALifeLoadedRounds`, `ProjectALifeEngineLoadedRounds`, `ProjectALifeWeaponClass`,
+- Ammunition / weapon: `ProjectALifeLoadedRounds`, `ProjectALifeEngineLoadedRounds`, `ProjectALifeWeaponClass`,
   `ProjectALifeActiveWeaponType`, `ProjectALifeWeaponJammed`.
-- Çatışma: `ProjectALifeCombatPhase`, `ProjectALifeCombatTactic`, `ProjectALifeTargetDistance`,
+- Combat: `ProjectALifeCombatPhase`, `ProjectALifeCombatTactic`, `ProjectALifeTargetDistance`,
   `ProjectALifeTacticalRole`, `ProjectALifeBehaviorTier`, `ProjectALifeFearOf/FearUntilMs`, `ProjectALifePanicUntilMs`.
-- Dayanıklılık: `ProjectALifeEndurance`, `ProjectALifeEnduranceMaximum`.
-- Tehdit: karar modülünün `context.threat`, `context.threatKind` (`player | zombie | actor`).
-- Oyuncu silahı çekili mi: `Talk.observations(...).player_armed`, `player:isAiming()`.
-- Saat: `Speech.clock()` (`hour`, `daysSurvived`).
-- Fraksiyon ilişkisi: `Relations.playerStance` (kategorik → one-hot).
+- Endurance: `ProjectALifeEndurance`, `ProjectALifeEnduranceMaximum`.
+- Threat: the decision module's `context.threat`, `context.threatKind` (`player | zombie | actor`).
+- Whether the player has a weapon drawn: `Talk.observations(...).player_armed`, `player:isAiming()`.
+- Time of day: `Speech.clock()` (`hour`, `daysSurvived`).
+- Faction relation: `Relations.playerStance` (categorical -> one-hot).
 
-## 9b. Test için NPC çağırma
+## 9b. Spawning NPCs for tests
 
-- A-Life sağ tık menüsü (`client/.../Interface/ALifeContextMenu.lua`, debug/admin): `[A-LIFE] Project A-Life` →
-  `Spawn faction squad here...` / `Open spawn panel`. İkisi de `ALifeDebugSpawnerWindow.open(...)` panelini açar.
-- Panel `sendClientCommand(player, "ProjectALife", "debugSpawnCatalog", { encounterId, count, x, y, z, ... })` gönderir
-  (`server/.../Admin/ALifeDebugService.lua`). Bu komut `Service.diagnosticCommands` listesinde; A-Life yalnızca
-  `alifeDiagnostics { enabled = true }` sonrası kabul eder. SP'de yetki her zaman var, MP'de admin gerekir.
-- Encounter kimlikleri `shared/.../World/ALifeEncounters.lua`: `patrol` (2–4), `raid` (Hostile Scouts),
-  `scavenger_crew`, `town_patrol`, `blockade` ... `fullscale_raid` tam ölçekli baskın başlatır, testte kullanma.
-  Spawn edilenler `Service.hostileProfileIds` ile seçilir, yani oyuncuya düşman olabilirler.
-- `factionId` verilirse o fraksiyondan seçer (`Service.hostileProfileIds(count, seed, factionId, true)`).
-  Oyuncuya bakış `common/alife_runtime/catalog/faction_registry.alife` içindeki `stance.player`: ör. dost/barışçıl
-  `alife_church_volunteers`, `alife_county_ems`, `alife_lone_nurse`; düşman `alife_hobbs`, `alife_pit`.
-- Bizim kısayol: `ALifeBrain.spawnTestNpc(factionId, count, encounterId, temporary)` → `Hooks.spawnTestNpc`
-  (varsayılan `alife_church_volunteers`, 1 NPC, `patrol`, kalıcı: komuta `persistent = true` gider).
-- **Kalıcılık (2026-10-11 doğrulandı):** `debugSpawnCatalog` `args.persistent` almazsa encounter tanımının
-  `persistent`'ini kullanır (`patrol` için yok) → kayıtta `memory.persistent`/`encounter` boş, `memory.debugSpawn`
-  dolu. `Population.expendable` bunları harcanabilir sayar: oyuncu 60 kareden (`spawnDistance`) uzaktayken uyuyan
-  (`dormant`) NPC, sandbox `Population_DormantTtlHours` ("Unvisited NPC lifetime", varsayılan 8 oyun saati) dolunca
-  `Registry.remove(..., "dormant_ttl")` ile silinir. `persistent = true` → `encounterPersistent` + `anchor`, silinmez.
-  **Kayıt:** `Persistence.forSave` kayda yalnızca izinli grupların kayıtlarını yazar: `SquadLedger.liveIds()` (offline
-  squad'lar), yerleşik karakol sakinleri ve `actorGroup` dönen diğer gruplar (`outpostId`, `squadId`, `persistent` ya da
-  `admin.persistent`; anahtar `groupId or encounter or uid`) `Persistence.squadCap`'e (sandbox
-  `Population_PersistentSquadCap`, "Saved group limit", varsayılan 20, en çok 500, canlı değişir) kadar. `sessionOnly` /
-  `outpostSquadId` hiç yazılmaz. Kalıcı olmayan NPC tek oturumluktur (`sessionActors`). **Uygulandı:** `Keeper.lua` +
-  `Hooks.keepGroupOf` (grubun bütün yaşayan üyelerine `Talk.writeMemory` ile `persistent = true`,
-  `alifeBrainKeptAtMs`), `Hooks.savedGroups`, `Hooks.releaseKept`. `Persistence.actorGroupCount` hiçbir yerde
-  kullanılmıyor; nüfus kapasitesi (`Population.capacityUsed`) yalnızca oyuncunun 60 karesindeki uyuyanları sayar.
-  A-Life her silmeyi `Telemetry.emit("actor_removed", {uid, reason})` ile yalnızca bellekteki halkaya (96 olay) ve
-  `Telemetry.counters`'a yazar, konsola basmaz: `ALifeBrain.npcs()` bunları gösterir (`Hooks.actorSnapshot`,
+- A-Life's right-click menu (`client/.../Interface/ALifeContextMenu.lua`, debug / admin): `[A-LIFE] Project A-Life` ->
+  `Spawn faction squad here...` / `Open spawn panel`. Both open the `ALifeDebugSpawnerWindow.open(...)` panel.
+- The panel sends `sendClientCommand(player, "ProjectALife", "debugSpawnCatalog", { encounterId, count, x, y, z, ... })`
+  (`server/.../Admin/ALifeDebugService.lua`). This command is in the `Service.diagnosticCommands` list; A-Life accepts
+  it only after `alifeDiagnostics { enabled = true }`. In SP the permission is always there, in MP it needs an admin.
+- Encounter ids are in `shared/.../World/ALifeEncounters.lua`: `patrol` (2-4), `raid` (Hostile Scouts),
+  `scavenger_crew`, `town_patrol`, `blockade` ... `fullscale_raid` starts a full-scale raid, do not use it in tests.
+  Spawns are chosen with `Service.hostileProfileIds`, so they may be hostile to the player.
+- With a `factionId` it chooses from that faction (`Service.hostileProfileIds(count, seed, factionId, true)`).
+  The view of the player is `stance.player` in `common/alife_runtime/catalog/faction_registry.alife`: e.g. friendly /
+  peaceful `alife_church_volunteers`, `alife_county_ems`, `alife_lone_nurse`; hostile `alife_hobbs`, `alife_pit`.
+- Our shortcut: `ALifeBrain.spawnTestNpc(factionId, count, encounterId, temporary)` -> `Hooks.spawnTestNpc`
+  (default `alife_church_volunteers`, 1 NPC, `patrol`, kept: `persistent = true` goes with the command).
+- **Persistence (verified 2026-10-11):** without `args.persistent`, `debugSpawnCatalog` uses the encounter definition's
+  `persistent` (there is none for `patrol`) -> in the record `memory.persistent` / `encounter` are empty and
+  `memory.debugSpawn` is set. `Population.expendable` counts these as expendable: a sleeping (`dormant`) NPC, while the
+  player is more than 60 tiles away (`spawnDistance`), is deleted with `Registry.remove(..., "dormant_ttl")` once the
+  sandbox `Population_DormantTtlHours` ("Unvisited NPC lifetime", default 8 game hours) runs out.
+  `persistent = true` -> `encounterPersistent` + `anchor`, never deleted.
+  **Saving:** `Persistence.forSave` writes into the save only the records of allowed groups: `SquadLedger.liveIds()`
+  (offline squads), resident outpost members and other groups `actorGroup` returns (`outpostId`, `squadId`,
+  `persistent` or `admin.persistent`; key `groupId or encounter or uid`) up to `Persistence.squadCap` (sandbox
+  `Population_PersistentSquadCap`, "Saved group limit", default 20, at most 500, changes live). `sessionOnly` /
+  `outpostSquadId` are never written. A non-persistent NPC lives for one session (`sessionActors`). **Implemented:**
+  `Keeper.lua` + `Hooks.keepGroupOf` (`persistent = true`, `alifeBrainKeptAtMs` for every living member of the group
+  through `Talk.writeMemory`), `Hooks.savedGroups`, `Hooks.releaseKept`. `Persistence.actorGroupCount` is used nowhere;
+  the population capacity (`Population.capacityUsed`) counts only sleepers within 60 tiles of the player.
+  A-Life writes every deletion with `Telemetry.emit("actor_removed", {uid, reason})` only into its in-memory ring
+  (96 events) and `Telemetry.counters`, not to the console: `ALifeBrain.npcs()` shows them (`Hooks.actorSnapshot`,
   `Hooks.lifecycleEvents`).
-- Gözlem (A-Life'a bildirilebilir): `hostileProfileIds` içindeki `seed % 2147483647` milisaniye zaman damgasıyla
-  çağrılıyor; Kahlua'nın `%` hatası yüzünden (bkz. CLAUDE.md) sonuç beklenenden farklı olabilir. Zararı muhtemelen
-  yalnızca profil seçiminin rastgeleliği.
+- Observation (could be reported to A-Life): `seed % 2147483647` in `hostileProfileIds` is called with a millisecond
+  timestamp; because of Kahlua's `%` bug (see CLAUDE.md) the result may differ from what is expected. The harm is
+  probably only in how random the profile choice is.
 
-## 10. Kırılganlık listesi (A-Life güncellenince kontrol et)
+## 10. Fragility list (check when A-Life is updated)
 
-Kancalarımızın dayandığı her şey `mod/.../ALifeBrainHooks.lua` içinde toplanacak:
+Everything our hooks rely on is gathered in `mod/.../ALifeBrainHooks.lua`:
 
-1. `ProjectALife.ModuleRegistry.register / evaluate` imzası ve `context` alanları.
-2. `ProjectALife.BehaviorProfiles.definitions[*].overlays` tablosu (modülümüze izin için).
-3. `ProjectALife.Talk.respond(player, listener, text, now, choiceIntent)` imzası; `listener = {record, shell, distance, inCone}`.
+1. The signature and `context` fields of `ProjectALife.ModuleRegistry.register / evaluate`.
+2. The `ProjectALife.BehaviorProfiles.definitions[*].overlays` table (to allow our modules).
+3. The signature of `ProjectALife.Talk.respond(player, listener, text, now, choiceIntent)`;
+   `listener = {record, shell, distance, inCone}`.
 4. `ProjectALife.Talk.hold`, `Talk.stance`, `Talk.observations`, `Talk.tolerate`, `Talk.writeMemory`.
 5. `ProjectALife.Speech.say / contextFor / playerKey / variable / clock`.
 6. `ProjectALife.DecisionLoop.states`, `setOrder`, `refreshDirective`.
-7. modData alan adları (`ProjectALifeOwned`, `ProjectALifeUID`, `ProjectALifeGeneration`, `ProjectALifeBehaviorState` ...).
+7. modData field names (`ProjectALifeOwned`, `ProjectALifeUID`, `ProjectALifeGeneration`, `ProjectALifeBehaviorState` ...).
 
-## 11. A-Life ekibine sorulacaklar (Discord)
+## 11. Questions for the A-Life team (Discord)
 
-1. Dış modların karar modülü kaydetmesi destekleniyor mu? `BehaviorProfiles` için dış modül whitelist'i
-   (ör. `BehaviorProfiles.allowExternal(id)`) eklenebilir mi?
-2. `Talk.respond` için resmi bir "dialogue provider" kancası (async cevap, bekleme ve zaman aşımı) düşünülür mü?
-3. Davranış klonlama için karar olaylarına abone olunabilecek bir yol (`decision_trace` dışında, ör. `Telemetry.adapters.log` zinciri) önerir misiniz?
-4. MP'de karar döngüsünün hangi tarafta koştuğu (`Executor.clientAuthority`) ve istemciye aynalanan aktör alanları.
-5. `memory` içine üçüncü parti alan yazmak (ör. `memory.alifeBrain = {...}`) kayıt göçünü (`RecordMigration`) bozar mı?
+1. Is it supported for external mods to register decision modules? Could an external module whitelist for
+   `BehaviorProfiles` (e.g. `BehaviorProfiles.allowExternal(id)`) be added?
+2. Would an official "dialogue provider" hook for `Talk.respond` (async reply, waiting and timeout) be considered?
+3. Would you suggest a way to subscribe to decision events for behaviour cloning (other than `decision_trace`, e.g.
+   the `Telemetry.adapters.log` chain)?
+4. In MP, on which side does the decision loop run (`Executor.clientAuthority`), and which actor fields are mirrored to
+   the client?
+5. Does writing third-party fields into `memory` (e.g. `memory.alifeBrain = {...}`) break record migration
+   (`RecordMigration`)?

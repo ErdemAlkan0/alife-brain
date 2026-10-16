@@ -22,7 +22,7 @@ require "ALifeBrain/ChatWindow"
 require "ALifeBrain/Tests/AllTests"
 
 ALifeBrain = ALifeBrain or {}
-ALifeBrain.VERSION = "0.1.0"
+ALifeBrain.VERSION = "0.1.1"
 
 local Json, Bridge, Hooks = ALifeBrain.Json, ALifeBrain.Bridge, ALifeBrain.Hooks
 
