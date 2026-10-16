@@ -1,7 +1,7 @@
 # A-Life hook points (study notes)
 
 Version studied: **Project A-Life v1.3.15** (`modversion=1.3.15`, `versionMin=42.21.0`), game **42.21.0**.
-Location: `C:\Users\ERDEM\Zomboid\mods\ProjectALifeNPCs\42.20\media\lua\` (not the Steam workshop, installed by hand;
+Location: `%USERPROFILE%\Zomboid\mods\ProjectALifeNPCs\42.20\media\lua\` (not the Steam workshop, installed by hand;
 the `workshop/content/108600/3803984183` path in CLAUDE.md does not exist on this machine).
 
 The file paths below are relative to this folder. When A-Life is updated, review this document and

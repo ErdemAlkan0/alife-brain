@@ -278,7 +278,7 @@ PZ Lua add-on <-> (JSON lines, file bridge) <-> Python sidecar <-> LLM provider 
 - Project Zomboid Build 42.20+ (stable), A-Life v1.3.x (supports B42.21).
 - Verified (2026-10-08): Windows 11, PZ 42.21.0, A-Life v1.3.15.
 - On this machine A-Life is **not** in the Steam workshop but installed by hand:
-  `C:\Users\ERDEM\Zomboid\mods\ProjectALifeNPCs\42.20\`.
+  `%USERPROFILE%\Zomboid\mods\ProjectALifeNPCs\42.20\`.
 - The Java that ships with the game: `C:\Program Files (x86)\Steam\steamapps\common\ProjectZomboid\jre64\bin\java.exe`
   (for Kahlua tests).
 - A-Life study notes: `docs/alife-hooks.md`.
