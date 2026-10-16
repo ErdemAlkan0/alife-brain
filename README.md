@@ -133,8 +133,10 @@ süre kalırsa son uyarı, sonra çatışma (A-Life'ın fraksiyon replikleriyle)
 penceresi kendiliğinden açılır; NPC önce konuşur (haraç ister ya da tehdit eder). Konuşurken ekibi ateş etmez.
 Haracı takas masasından verirsen (yanına yürüyüp "Kabul et") ya da seni gönderirse bir süre rahat bırakılırsın.
 Pencereyi kapatırsan, ekipten birine vurursan, 45 saniye susarsan ya da NPC vazgeçerse çatışma başlar; çok
-uzaklaşırsan pazarlık biter. Daha önce saldırdığın ya da kendi soygun sistemiyle seni soyan ekipler A-Life gibi
-davranır. `ALifeBrain.status()` içinde `parley` ve `standoff` sayaçları var.
+uzaklaşırsan pazarlık biter. Doğrudan saldırdığın, uyarılarını dinlemediğin, son iki dakikada vurduğun ya da kendi
+soygun sistemiyle seni soyan ekipler A-Life gibi davranır. Fraksiyonunun başka bir grubuyla kavga ettiğin için düşman
+olan ekip ise önce konuşur; öfkelidir ve hemen saldırmaya da karar verebilir. Seni fark edip göremeyen NPC birkaç
+saniye görmeyi bekler. `ALifeBrain.status()` içinde `parley` ve `standoff` sayaçları var.
 Sahte sağlayıcıda anahtar kelimeler: "su" / "water", "yemek" / "food", "takip" / "follow", "bekle" / "wait",
 "hoşça kal" / "bye".
 
@@ -252,6 +254,8 @@ yazılır ("policy control: ..."), yani oynanıştan sonra konsola bakmadan okun
 uyarıları dinlemeyene ateş açar) sana en az 5 güvenince bütün grubu yaklaşmana izin verir: A-Life'ın kendi
 `Talk.tolerate` kolu, temkinli → tarafsız; uyarılar durur, pencerenin başlığında "Sana güveniyor" yazar, LLM'e de
 söylenir. Güven 3'ün altına düşünce geri alınır. Düşman gruplar düşman kalır; vurursan grup yine döner.
+Konuşmadan da olur: hediye, adil takas ya da yanlarında zombi öldürmek güveni sidecar'da artırır ve oyun bunu hemen
+öğrenir.
 
 Takip: LLM takibi kabul ederse NPC, oyuncuya güvensiz (güven < 0) ya da düşman değilse takip eder. Hafıza: fraksiyon
 anıları kayıt (save) başınadır; eski bir kayıtta öldürdüğün biri yeni dünyadaki NPC'lerin hafızasına girmez.

@@ -281,6 +281,13 @@ class ParseReplyTests(unittest.TestCase):
         _, user = build_messages(later, memories=[], history=[], trust=0, fear=0)
         self.assertIn(f'{STRANGER_SAYS} "Tamam, alın."', user["content"])
         self.assertFalse(parse_request(request_data()).standoff)
+        self.assertNotIn("for what they did to others of your faction", system["content"])
+        feud = parse_request(dict(data, standoff={"opening": True, "feud": True}))
+        self.assertTrue(feud.feud)
+        system, _ = build_messages(feud, memories=[], history=[], trust=0, fear=0)
+        self.assertIn("for what they did to others of your faction", system["content"])
+        self.assertIn("you speak first", system["content"])
+        self.assertFalse(parse_request(dict(data, standoff={"feud": "yes"})).feud)
 
     def test_intent_variants(self):
         for raw, expected in {"hand_over": "give", "Give Item": "give", "drop": "give", "wait": "stay",

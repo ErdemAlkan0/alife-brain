@@ -49,14 +49,13 @@ end
 -- The live Control (and its switch) survive the test: ALifeBrain.runTests() may run mid-game.
 local function withControl(body)
     return function(check)
-        local saved = { forced = Control.forced, override = Control.override, cache = Control.cache, stats = Control.stats }
-        local env = controlEnv()
-        Control.reset()
-        Control.forced = true
-        Control.override = env
-        local ok, failure = pcall(body, check, env)
-        for key, value in pairs(saved) do Control[key] = value end
-        if not ok then error(failure) end
+        ALifeBrain.Tests.keeping(Control, { "forced", "override", "cache", "stats" }, function()
+            local env = controlEnv()
+            Control.reset()
+            Control.forced = true
+            Control.override = env
+            body(check, env)
+        end)
     end
 end
 
@@ -233,8 +232,9 @@ ALifeBrain.Tests.suite("Decision tap", {
 -- Moods: a fake bridge and player key.
 local function withMoods(body)
     return function(check)
-        local saved = { override = Moods.override, wanted = Moods.wanted, order = Moods.order, askedAtMs = Moods.askedAtMs,
-            inflight = Moods.inflight, lastSentMs = Moods.lastSentMs, stats = Moods.stats }
+        local fields = { "override", "wanted", "order", "askedAtMs", "refreshing", "inflight", "lastSentMs", "stats" }
+        local saved = {}
+        for index, field in ipairs(fields) do saved[index] = Moods[field] end
         local env = { now = 900000, requests = {} }
         env.bridge = { online = true, features = { moods = true } }
         function env.bridge:isOnline() return self.online end
@@ -246,7 +246,7 @@ local function withMoods(body)
         Moods.reset()
         Moods.override = { bridge = env.bridge, hooks = env.hooks, player = {} }
         local ok, failure = pcall(body, check, env)
-        for key, value in pairs(saved) do Moods[key] = value end
+        for index, field in ipairs(fields) do Moods[field] = saved[index] end
         for uid in pairs(Dialogue.minds) do
             if string.sub(uid, 1, 11) == "test:moods:" then Dialogue.minds[uid] = nil end
         end
@@ -277,6 +277,20 @@ ALifeBrain.Tests.suite("Moods", {
         check.equal(Moods.stats.filled, 1)
         Moods.tick(env.now + Moods.settings.periodMs)
         check.same(env.requests[2].data.uids, { "test:moods:c" })
+    end) },
+    { "after an event it asks again for an NPC it knows, and the new mood replaces the old", withMoods(function(check, env)
+        Dialogue.minds["test:moods:known"] = { trust = 7, fear = 0, goal = 0, goalAtMs = 0, intent = "trade" }
+        Moods.want("test:moods:known", env.now)
+        check.equal(#Moods.order, 0, "known: not asked")
+        Moods.refresh("test:moods:known")
+        Moods.refresh("test:moods:known")
+        Moods.tick(env.now)
+        check.same(env.requests[1].data.uids, { "test:moods:known" }, "asked once")
+        env.requests[1].callback(true, { moods = { { uid = "test:moods:known", trust = 13, fear = -1, goal = 5 } } })
+        check.same(Dialogue.minds["test:moods:known"], { trust = 13, fear = -1, goal = 5, goalAtMs = env.now, intent = "trade" })
+        Moods.want("test:moods:known", env.now)
+        Moods.tick(env.now + Moods.settings.periodMs)
+        check.equal(#env.requests, 1, "only after an event")
     end) },
     { "an NPC that came back empty is asked again only after a while", withMoods(function(check, env)
         Moods.want("test:moods:d", env.now)
@@ -443,8 +457,7 @@ ALifeBrain.Tests.suite("Pause", {
 
 ALifeBrain.Tests.suite("Robberies", {
     { "reports how a robbery ended, once, with the crew and what was taken", function(check)
-        local saved = { override = Robberies.override, seen = Robberies.seen, lastMs = Robberies.lastMs, stats = Robberies.stats }
-        local ok, failure = pcall(function()
+        ALifeBrain.Tests.keeping(Robberies, { "override", "seen", "lastMs", "stats" }, function()
             local active, sent = {}, {}
             Robberies.seen, Robberies.lastMs, Robberies.stats = {}, 0, { seen = 0, reported = 0 }
             Robberies.override = {
@@ -473,51 +486,52 @@ ALifeBrain.Tests.suite("Robberies", {
             Robberies.tick(3000)
             check.equal(#sent, 1, "reported once")
         end)
-        for key, value in pairs(saved) do Robberies[key] = value end
-        if not ok then error(failure) end
     end },
 })
 
 -- Rapport: fake A-Life records, stance (careful unless env.stances says otherwise; tolerated
 -- reads as neutral, as in Relations.playerStance) and Talk.tolerate.
+local function rapportEnv()
+    local env = { now = 100000, minds = {}, stances = {}, tolerated = {}, writes = {}, logs = {}, player = { id = "player" } }
+    env.records = {
+        ["palife:a"] = { uid = "palife:a", name = "Hunter", lifecycle = "active", memory = { groupId = "g1" } },
+        ["palife:b"] = { uid = "palife:b", name = "Scrapper", lifecycle = "active", memory = { groupId = "g1" } },
+        ["palife:c"] = { uid = "palife:c", name = "Biker", lifecycle = "active", memory = { groupId = "g2" } },
+    }
+    env.hooks = {
+        peekRecord = function(uid) return env.records[uid] end,
+        groupKey = Hooks.groupKey,
+        stance = function(record)
+            local key = Hooks.groupKey(record)
+            local base, untilMs = env.stances[key] or "careful", env.tolerated[key]
+            if base == "careful" and untilMs ~= nil and env.now < untilMs then return "neutral" end
+            return base
+        end,
+        toleratedUntil = function(record) return env.tolerated[Hooks.groupKey(record)] end,
+        tolerate = function(record, _, untilMs)
+            if env.fail then return false end
+            env.writes[#env.writes + 1] = { Hooks.groupKey(record), untilMs }
+            env.tolerated[Hooks.groupKey(record)] = untilMs
+            return true
+        end,
+        nameOf = function(record) return record.name end,
+    }
+    function env.trust(uid, value) env.minds[uid] = { trust = value } end
+    function env.tick(ms)
+        env.now = env.now + (ms or Rapport.settings.periodMs)
+        Rapport.tick(env.now)
+    end
+    Rapport.reset()
+    Rapport.override = { hooks = env.hooks, minds = env.minds, player = env.player,
+        log = function(text) env.logs[#env.logs + 1] = text end }
+    return env
+end
+
 local function withRapport(body)
     return function(check)
-        local saved = { override = Rapport.override, granted = Rapport.granted, lastMs = Rapport.lastMs, stats = Rapport.stats }
-        local env = { now = 100000, minds = {}, stances = {}, tolerated = {}, writes = {}, logs = {}, player = { id = "player" } }
-        env.records = {
-            ["palife:a"] = { uid = "palife:a", name = "Hunter", lifecycle = "active", memory = { groupId = "g1" } },
-            ["palife:b"] = { uid = "palife:b", name = "Scrapper", lifecycle = "active", memory = { groupId = "g1" } },
-            ["palife:c"] = { uid = "palife:c", name = "Biker", lifecycle = "active", memory = { groupId = "g2" } },
-        }
-        env.hooks = {
-            peekRecord = function(uid) return env.records[uid] end,
-            groupKey = Hooks.groupKey,
-            stance = function(record)
-                local key = Hooks.groupKey(record)
-                local base, untilMs = env.stances[key] or "careful", env.tolerated[key]
-                if base == "careful" and untilMs ~= nil and env.now < untilMs then return "neutral" end
-                return base
-            end,
-            toleratedUntil = function(record) return env.tolerated[Hooks.groupKey(record)] end,
-            tolerate = function(record, _, untilMs)
-                if env.fail then return false end
-                env.writes[#env.writes + 1] = { Hooks.groupKey(record), untilMs }
-                env.tolerated[Hooks.groupKey(record)] = untilMs
-                return true
-            end,
-            nameOf = function(record) return record.name end,
-        }
-        function env.trust(uid, value) env.minds[uid] = { trust = value } end
-        function env.tick(ms)
-            env.now = env.now + (ms or Rapport.settings.periodMs)
-            Rapport.tick(env.now)
-        end
-        Rapport.reset()
-        Rapport.override = { hooks = env.hooks, minds = env.minds, player = env.player,
-            log = function(text) env.logs[#env.logs + 1] = text end }
-        local ok, failure = pcall(body, check, env)
-        for key, value in pairs(saved) do Rapport[key] = value end
-        if not ok then error(failure) end
+        ALifeBrain.Tests.keeping(Rapport, { "override", "granted", "lastMs", "stats" }, function()
+            body(check, rapportEnv())
+        end)
     end
 end
 

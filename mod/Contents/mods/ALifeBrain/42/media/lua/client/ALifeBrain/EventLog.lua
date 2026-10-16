@@ -59,6 +59,21 @@ local function actorRef(object, named)
     return { kind = "other" }
 end
 
+-- Events by the player that move the NPCs' trust or fear in the sidecar (experience.py): the
+-- game then asks for their moods again (Moods.refresh).
+EventLog.MOOD_EVENTS = { npc_hit = true, player_helped = true, robbed_player = true }
+
+local function refreshMoods(kind, fields)
+    local moods = ALifeBrain.Moods
+    if moods == nil or not EventLog.MOOD_EVENTS[kind] or type(fields.by) ~= "table" or fields.by.kind ~= "player" then
+        return
+    end
+    if type(fields.npc) == "table" then moods.refresh(fields.npc.uid) end
+    for _, member in ipairs(type(fields.crew) == "table" and fields.crew or {}) do
+        if type(member) == "table" then moods.refresh(member.uid) end
+    end
+end
+
 function EventLog.emit(kind, fields)
     if EventLog.settings.enabled ~= true then return false end
     local bridge = ALifeBrain.bridge
@@ -67,6 +82,7 @@ function EventLog.emit(kind, fields)
     fields.kind = kind
     local ok = bridge:send("event", fields)
     if not ok then EventLog.metrics.refused = EventLog.metrics.refused + 1 end
+    if ok then refreshMoods(kind, fields) end
     return ok
 end
 

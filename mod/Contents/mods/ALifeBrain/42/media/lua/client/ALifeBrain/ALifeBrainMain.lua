@@ -125,6 +125,7 @@ function Main.onTick()
             Main.modulesAtMs = now
             Hooks.installModules()
             ALifeBrain.Standoff.forget(now)
+            ALifeBrain.Parley.forget(now)
             ALifeBrain.Control.forget(now)
             ALifeBrain.Moods.forget(now)
         end

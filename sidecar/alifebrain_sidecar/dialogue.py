@@ -85,6 +85,7 @@ class DialogueRequest:
     # speaks first; text is then a narration, not the stranger's words.
     standoff: bool = False
     opening: bool = False
+    feud: bool = False  # in a standoff: the NPC's faction is hostile for what the stranger did to its other groups
     vouched: bool = False  # see VOUCHED
     language: str | None = None  # the game's language code, e.g. "TR"
     # Trade window: everything the NPC could trade, what the stranger could trade (the NPC may
@@ -260,6 +261,7 @@ def parse_request(data: Any) -> DialogueRequest:
         following=npc_data.get("following") is True,
         standoff=isinstance(data.get("standoff"), dict),
         opening=isinstance(data.get("standoff"), dict) and data["standoff"].get("opening") is True,
+        feud=isinstance(data.get("standoff"), dict) and data["standoff"].get("feud") is True,
         vouched=data.get("vouched") is True,
         language=_text(world.get("language"), 8),
         tradeable=_trade_lines(npc_data.get("tradeable"), MAX_TRADEABLE),
@@ -284,6 +286,15 @@ STANDOFF_RULES = (
     "stall, attack. Look at the conversation so far: if you already warned them once, do not warn again. intent "
     "leave = you let them go; use it once they paid or clearly back off. You are not their friend and you do not "
     "hand anything out."
+)
+
+
+# A crew whose faction is hostile for what the stranger did to its other groups (the game's
+# Hooks.parleyBlocked): it talks first now, instead of opening fire without a word.
+FEUD_RULE = (
+    "- Your people count the stranger as an enemy for what they did to others of your faction (see what you "
+    "remember, if anything). You are angry and quick to start the fight, but you speak first; a stranger who "
+    "pays or backs off may still walk away."
 )
 
 
@@ -436,6 +447,8 @@ def build_messages(request: DialogueRequest, *, memories: list[Memory], history:
 
     if request.standoff:
         system.append(STANDOFF_RULES.strip())
+        if request.feud:
+            system.append(FEUD_RULE)
 
     user = []
     if history:

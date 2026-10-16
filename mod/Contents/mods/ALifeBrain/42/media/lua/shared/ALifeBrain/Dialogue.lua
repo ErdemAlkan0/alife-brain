@@ -57,7 +57,7 @@ Dialogue.override = nil
 
 local function deps()
     if Dialogue.override ~= nil then return Dialogue.override end
-    return { bridge = ALifeBrain.bridge, hooks = ALifeBrain.Hooks }
+    return { bridge = ALifeBrain.bridge, hooks = ALifeBrain.Hooks, moods = ALifeBrain.Moods }
 end
 
 function Dialogue.supported(bridge)
@@ -119,6 +119,18 @@ function Dialogue.learnMood(uid, mood, now)
     return true
 end
 
+-- The sidecar's stored mood after an event changed it (Moods.refresh): replaces trust, fear and
+-- drive of a known mind (its last intent stays), fills an unknown one.
+function Dialogue.updateMood(uid, mood, now)
+    local mind = Dialogue.minds[uid]
+    if mind == nil then return Dialogue.learnMood(uid, mood, now) end
+    if type(mood) ~= "table" then return false end
+    mind.trust = clamp(mood.trust, -100, 100) or mind.trust
+    mind.fear = clamp(mood.fear, -100, 100) or mind.fear
+    mind.goal, mind.goalAtMs = clamp(mood.goal, -100, 100) or mind.goal, now
+    return true
+end
+
 -- The drive now, settled toward 0 since it was last stirred (-100..100).
 function Dialogue.goalNow(mind, now)
     if type(mind) ~= "table" then return 0 end
@@ -156,7 +168,9 @@ function Dialogue.ask(player, record, shell, text, view, trade, options)
     request.stance = stance
     -- A careful group that lets the player close because this NPC trusts them (Rapport.lua).
     request.vouched = ALifeBrain.Rapport.vouches(record, hooks.nowMs()) or nil
-    if options.standoff == true then request.standoff = { opening = options.opening == true } end
+    if options.standoff == true then
+        request.standoff = { opening = options.opening == true, feud = options.feud == true or nil }
+    end
     request.world = request.world or {}
     request.world.language = ALifeBrain.Text ~= nil and ALifeBrain.Text.language() or nil
     request.npc = request.npc or { uid = uid }
@@ -232,6 +246,10 @@ function Dialogue.report(player, record, shell, outcome)
         npc = d.hooks.describe(shell) or { uid = record.uid },
         by = { kind = "player", key = d.hooks.playerKey(player) },
     })
+    -- A gift or a fair trade moves trust in the sidecar: the game learns it now, not at the next reply.
+    if d.moods ~= nil and (outcome.action == "trade" or outcome.action == "give") and outcome.ok then
+        d.moods.refresh(record.uid)
+    end
 end
 
 -- Swaps the trade table (shared by the NPC's "accept" and the player accepting a counter-offer).

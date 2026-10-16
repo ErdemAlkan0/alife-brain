@@ -6,13 +6,14 @@ local Parley = ALifeBrain.Parley
 -- Fake A-Life side: records truces, voices and re-thinks; tweak env fields per case.
 local function harness()
     local env = { now = 1000, truces = {}, voices = {}, rethinks = 0, opened = {}, ended = {}, blocked = nil,
-        ready = true, thinking = false, reach = true, talkable = true, records = { leader = { uid = "leader" } } }
+        ready = true, thinking = false, reach = true, talkable = true,
+        records = { leader = { uid = "leader", group = "g1" }, mate = { uid = "mate", group = "g1" } } }
     env.player = { dead = false }
     function env.player:isDead() return self.dead end
     env.hooks = {
         groupKey = function(actor) return actor.group or ("solo:" .. actor.uid) end,
         reputationKey = function() return "sp:0" end,
-        parleyBlocked = function() return env.blocked end,
+        parleyBlocked = function() return env.blocked, env.feud end,
         crewOf = function(actor) return { [actor.uid] = true, mate = true } end,
         truce = function(crew, player, untilMs) env.truces[#env.truces + 1] = { crew = crew, untilMs = untilMs } end,
         voice = function(_, event) env.voices[#env.voices + 1] = event end,
@@ -26,7 +27,8 @@ local function harness()
     return env
 end
 
-local LIVE = { "active", "cooldowns", "stats", "onOpen", "onEnd", "override", "lastNote", "noted" }
+local LIVE = { "active", "cooldowns", "stats", "onOpen", "onEnd", "override", "lastNote", "noted", "unseenSince",
+    "attackedAtMs" }
 
 local function run(body)
     return function(check)
@@ -34,6 +36,7 @@ local function run(body)
         for _, field in ipairs(LIVE) do saved[field] = Parley[field] end
         local env = harness()
         Parley.active, Parley.cooldowns, Parley.override, Parley.noted = nil, {}, env.deps, {}
+        Parley.unseenSince, Parley.attackedAtMs = {}, {}
         Parley.stats = { started = 0, paid = 0, sentAway = 0, fights = 0, gotAway = 0 }
         Parley.onOpen = function(parley) env.opened[#env.opened + 1] = parley end
         Parley.onEnd = function(parley, outcome, reason) env.ended[#env.ended + 1] = { outcome = outcome, reason = reason } end
@@ -66,6 +69,42 @@ ALifeBrain.Tests.suite("Parley", {
         check.isNil(Parley.consider(leader, {}, env.player, env.now))
         check.equal(Parley.lastNote, "grudge")
         check.isNil(Parley.active)
+    end) },
+
+    { "a crew hostile only for its faction's grudge talks first, and the LLM is told", run(function(check, env)
+        env.feud = true
+        check.equal(Parley.consider(leader, {}, env.player, env.now), "hold")
+        check.equal(env.opened[1].feud, true)
+        Parley.onWindowClosed("leader", env.now + 1)
+        Parley.cooldowns, env.feud = {}, nil
+        Parley.consider(leader, {}, env.player, env.now)
+        check.equal(env.opened[2].feud, false)
+    end) },
+
+    { "an NPC that notices the player unseen waits a moment for sight", run(function(check, env)
+        env.blocked = "unseen"
+        check.equal(Parley.consider(leader, {}, env.player, env.now), "hold", "holds its fire")
+        check.isNil(Parley.active, "nobody to call out to yet")
+        env.blocked = nil
+        check.equal(Parley.consider(leader, {}, env.player, env.now + 2000), "hold")
+        check.equal(#env.opened, 1, "seen now: it calls out")
+        Parley.onWindowClosed("leader", env.now + 2001)
+        Parley.cooldowns, env.blocked = {}, "unseen"
+        Parley.consider(mate, {}, env.player, env.now + 3000)
+        check.isNil(Parley.consider(mate, {}, env.player, env.now + 3000 + Parley.settings.sightWaitMs),
+            "never seen: A-Life fights")
+        check.equal(Parley.lastNote, "unseen")
+    end) },
+
+    { "a crew the player just hit shoots instead of talking", run(function(check, env)
+        Parley.onPlayerAttack("mate", env.now)
+        check.equal(Parley.consider(leader, {}, env.player, env.now + 1000), nil, "the same group")
+        check.equal(Parley.lastNote, "attacked")
+        check.equal(Parley.consider(stranger, {}, env.player, env.now + 1000), "hold", "another group still talks")
+        Parley.onWindowClosed("other", env.now + 1001)
+        Parley.forget(env.now + Parley.settings.attackedMs + 1)
+        check.equal(Parley.consider(leader, {}, env.player, env.now + Parley.settings.attackedMs + 1), "hold",
+            "after a while it talks again")
     end) },
 
     { "the truce is renewed while they talk; stalling ends in a fight", run(function(check, env)

@@ -57,6 +57,7 @@ Hooks.touchpoints = {
     { path = "Talk.stance", side = "server" },
     { path = "Talk.observations", side = "server" },
     { path = "Talk.tolerate", side = "server" },
+    { path = "ModuleCareful.lineOfSight", side = "server" },
     { path = "Talk.writeMemory", side = "server" },
     { path = "ActorRegistry.read", side = "server" },
     { path = "DecisionLoop.states", side = "server", kind = "table" },
@@ -942,14 +943,6 @@ end
 -- the NPC's whole group or outpost; A-Life does so itself, for 8 minutes, when an NPC agrees
 -- to walk together. Hostile stays hostile, and a hit still turns the group.
 
--- The group A-Life warns and tolerates as one (ModuleCareful's groupOf).
-function Hooks.groupKey(record)
-    local memory = type(record) == "table" and type(record.memory) == "table" and record.memory or {}
-    if memory.outpostId ~= nil then return "outpost:" .. tostring(memory.outpostId) end
-    if memory.groupId ~= nil then return tostring(memory.groupId) end
-    return "solo:" .. tostring(type(record) == "table" and record.uid or nil)
-end
-
 -- A-Life's stored record (no copy), or nil.
 function Hooks.peekRecord(uid)
     local peek = resolve("ActorRegistry.peek")
@@ -1547,12 +1540,21 @@ function Hooks.reputationKey(player)
     return Hooks.playerKey(player)
 end
 
+-- The group A-Life warns, tolerates and fights as one (ModuleCareful's groupOf): an outpost, a
+-- squad, or the NPC alone. Rapport and Parley key their state by it.
 function Hooks.groupKey(actor)
     local memory = type(actor) == "table" and type(actor.memory) == "table" and actor.memory or {}
-    return tostring(memory.groupId or ("solo:" .. tostring(actor.uid)))
+    if memory.outpostId ~= nil then return "outpost:" .. tostring(memory.outpostId) end
+    if memory.groupId ~= nil then return tostring(memory.groupId) end
+    return "solo:" .. tostring(type(actor) == "table" and actor.uid or nil)
 end
 
--- Why this hostile NPC would rather shoot than talk, or nil.
+-- Why this hostile NPC would rather shoot than talk, or nil; then also feud = true when it is
+-- hostile only because its faction holds what the player did to its other groups against them
+-- (A-Life Reputation: one attack on a careful or neutral faction makes all of it hostile for
+-- good). Such a crew talks first: the LLM knows (faction memories) and may still open fire.
+-- Its own group attacked, or walked through its warnings (hostileToPlayerKeys): it shoots.
+-- Play test (2026-10-12): 17 of 26 crews opened fire without a word, all for their faction.
 function Hooks.parleyBlocked(actor, shell, player, now, tiles)
     if multiplayerClient() then return "multiplayer" end
     if Hooks.inCombat(actor) then return "fighting" end
@@ -1562,17 +1564,27 @@ function Hooks.parleyBlocked(actor, shell, player, now, tiles)
     if key ~= nil and type(memory.hostileToPlayerKeys) == "table" and memory.hostileToPlayerKeys[key] == true then
         return "grudge" -- attacked, or walked through its warnings
     end
-    local reputation = resolve("Reputation.recordedStatus")
-    if type(reputation) == "function" then
-        local ok, earned = pcall(reputation, player, actor)
-        if ok and earned == "hostile" then return "grudge" end
-    end
     local inVehicle = false
     pcall(function() inVehicle = player:getVehicle() ~= nil end)
     if inVehicle then return "vehicle" end
     if not Hooks.withinReach(player, shell, tiles) then return "far" end
-    if not Hooks.lineOfSight(player, shell) then return "unseen" end
+    if not Hooks.parleySees(player, shell) then return "unseen" end
+    local reputation = resolve("Reputation.recordedStatus")
+    if type(reputation) == "function" then
+        local ok, earned = pcall(reputation, player, actor)
+        if ok and earned == "hostile" then return nil, true end
+    end
     return nil
+end
+
+-- A clear line by our check (Talk.lineOfSight) or by A-Life's own for its warnings
+-- (ModuleCareful.lineOfSight: the engine's CanSee, then its sight rays).
+function Hooks.parleySees(player, shell)
+    if Hooks.lineOfSight(player, shell) then return true end
+    local careful = resolve("ModuleCareful.lineOfSight")
+    if type(careful) ~= "function" then return false end
+    local ok, seen = pcall(careful, shell, player)
+    return ok and seen == true
 end
 
 -- The NPC and its squad mates within tiles: { uid = true }.

@@ -70,6 +70,8 @@ local function harness(options)
         end,
     }
 
+    -- The live conversations and minds survive the test: ALifeBrain.runTests() runs in the game.
+    env.live = { Dialogue.pending, Dialogue.minds, Dialogue.gives, Dialogue.metrics, Dialogue.lastError, Dialogue.override }
     Dialogue.pending, Dialogue.minds, Dialogue.gives = {}, {}, {}
     Dialogue.metrics = { asked = 0, answered = 0, fallbacks = 0, busy = 0, dropped = 0, actions = 0 }
     Dialogue.override = { bridge = env.bridge, hooks = env.hooks }
@@ -95,9 +97,9 @@ local function harness(options)
         return view
     end
     function env.done()
-        Dialogue.override = nil
-        Dialogue.pending, Dialogue.minds, Dialogue.gives, Dialogue.lastError = {}, {}, {}, nil
-        Dialogue.metrics = { asked = 0, answered = 0, fallbacks = 0, busy = 0, dropped = 0, actions = 0 }
+        local live = env.live
+        Dialogue.pending, Dialogue.minds, Dialogue.gives, Dialogue.metrics = live[1], live[2], live[3], live[4]
+        Dialogue.lastError, Dialogue.override = live[5], live[6]
     end
     return env
 end
@@ -352,6 +354,9 @@ ALifeBrain.Tests.suite("Dialogue", {
             check.truthy(id ~= nil)
             local data = env.requests[1].data
             check.same(data.standoff, { opening = true })
+            env.answer(1, true, { say = "Hands up.", trust = 0, fear = 0, intent = "warn" })
+            Dialogue.ask(env.player, env.npc, env.shell, "Easy.", env.view(), nil, { standoff = true, feud = true })
+            check.same(env.requests[2].data.standoff, { opening = false, feud = true }, "its faction's grudge")
             check.equal(data.stance, "hostile")
             check.equal(type(data.world.language), "string", "the NPC needs to know which language to open in")
         end)
@@ -457,18 +462,17 @@ ALifeBrain.Tests.suite("Dialogue", {
     { "a reply that earns enough trust lets the player close, and says so", function(check)
         run({ stance = "careful" }, function(env)
             local Rapport = ALifeBrain.Rapport
-            local saved = { override = Rapport.override, granted = Rapport.granted, lastMs = Rapport.lastMs, stats = Rapport.stats }
-            local tolerated = {}
-            Rapport.reset()
-            Rapport.override = { player = env.player, minds = Dialogue.minds, log = function() end, hooks = {
-                peekRecord = function(uid) if uid == env.npc.uid then return env.npc end end,
-                groupKey = function(record) return "solo:" .. record.uid end,
-                stance = function() return env.stance end,
-                tolerate = function(_, _, untilMs) tolerated[#tolerated + 1] = untilMs; return true end,
-                toleratedUntil = function() return tolerated[#tolerated] end,
-                nameOf = function() return "Henry" end,
-            } }
-            local ok, failure = pcall(function()
+            ALifeBrain.Tests.keeping(Rapport, { "override", "granted", "lastMs", "stats" }, function()
+                local tolerated = {}
+                Rapport.reset()
+                Rapport.override = { player = env.player, minds = Dialogue.minds, log = function() end, hooks = {
+                    peekRecord = function(uid) if uid == env.npc.uid then return env.npc end end,
+                    groupKey = function(record) return "solo:" .. record.uid end,
+                    stance = function() return env.stance end,
+                    tolerate = function(_, _, untilMs) tolerated[#tolerated + 1] = untilMs; return true end,
+                    toleratedUntil = function() return tolerated[#tolerated] end,
+                    nameOf = function() return "Henry" end,
+                } }
                 local view, changes = env.view(), {}
                 function view:onRapport(change) changes[#changes + 1] = change end
                 Dialogue.ask(env.player, env.npc, env.shell, "A fair trade?", view)
@@ -486,10 +490,17 @@ ALifeBrain.Tests.suite("Dialogue", {
                 env.answer(3, true, { say = "Fine.", trust = 6, fear = 0, intent = "none" })
                 check.equal(#env.called("notify"), 1, "the talk box tells the player above their head")
             end)
-            for key, value in pairs(saved) do Rapport[key] = value end
-            if not ok then error(failure, 0) end
         end)
     end },
+
+    { "a gift or a fair trade asks for the NPC's mood again", function(check) run(nil, function(env)
+        local refreshed = {}
+        Dialogue.override.moods = { refresh = function(uid) refreshed[#refreshed + 1] = uid end }
+        Dialogue.report(env.player, env.npc, env.shell, { action = "trade", decision = "accept", ok = true })
+        Dialogue.report(env.player, env.npc, env.shell, { action = "trade", decision = "reject", ok = false })
+        Dialogue.report(env.player, env.npc, env.shell, { action = "follow", ok = true })
+        check.same(refreshed, { "palife:1" })
+    end) end },
 
     { "keeps long replies bounded", function(check) run(nil, function(env)
         env.talk()

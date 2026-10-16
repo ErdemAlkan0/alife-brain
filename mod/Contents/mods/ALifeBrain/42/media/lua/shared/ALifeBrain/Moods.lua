@@ -3,6 +3,7 @@
 -- decision log) meets such an NPC its uid is queued, and a "moods" request now and then
 -- fetches a batch (docs/bridge-protocol.md) into Dialogue.minds. NPCs the sidecar knows
 -- nothing about come back empty and stay at 0; they are asked again after retryMs.
+-- Moods.refresh asks again for a known NPC after an event moved its trust in the sidecar.
 
 require "ALifeBrain/Json"
 require "ALifeBrain/Dialogue"
@@ -20,6 +21,7 @@ local Moods = {
     wanted = {},
     order = {},
     askedAtMs = {},
+    refreshing = {}, -- uids asked again although their mind is known
     inflight = false,
     lastSentMs = 0,
     stats = { asked = 0, filled = 0, failed = 0 },
@@ -36,7 +38,7 @@ local function deps()
 end
 
 function Moods.reset()
-    Moods.wanted, Moods.order, Moods.askedAtMs = {}, {}, {}
+    Moods.wanted, Moods.order, Moods.askedAtMs, Moods.refreshing = {}, {}, {}, {}
     Moods.inflight, Moods.lastSentMs = false, 0
     Moods.stats = { asked = 0, filled = 0, failed = 0 }
 end
@@ -55,6 +57,19 @@ function Moods.want(uid, now)
     Moods.order[#Moods.order + 1] = uid
 end
 
+-- An event just moved this NPC's trust or fear in the sidecar (a gift, a fair trade, help against
+-- the dead, a hit, a robbery; EventLog.MOOD_EVENTS, Dialogue.report): asks again although its
+-- mind is known, so trust earned by deeds counts (Rapport.lua, the policy) before the next
+-- conversation. Play test (2026-10-12): a gift took Henry's trust to 13 in the sidecar while
+-- the game still read the 7 of his last reply.
+function Moods.refresh(uid)
+    if type(uid) ~= "string" then return end
+    Moods.refreshing[uid] = true
+    if Moods.wanted[uid] or #Moods.order >= Moods.settings.maxWanted then return end
+    Moods.wanted[uid] = true
+    Moods.order[#Moods.order + 1] = uid
+end
+
 -- Called every game tick: sends one batch when there is one and the sidecar can answer.
 function Moods.tick(now)
     if Moods.inflight or #Moods.order == 0 or now - Moods.lastSentMs < Moods.settings.periodMs then return end
@@ -63,12 +78,14 @@ function Moods.tick(now)
     local key = d.player ~= nil and d.hooks.playerKey(d.player) or nil
     if key == nil then return end
     local minds = ALifeBrain.Dialogue.minds
-    local uids = ALifeBrain.Json.array({})
+    local uids, refreshed = ALifeBrain.Json.array({}), {}
     while #uids < Moods.settings.batch and #Moods.order > 0 do
         local uid = table.remove(Moods.order, 1)
         Moods.wanted[uid] = nil
-        if minds[uid] == nil then
+        if minds[uid] == nil or Moods.refreshing[uid] then
             uids[#uids + 1] = uid
+            refreshed[uid] = Moods.refreshing[uid]
+            Moods.refreshing[uid] = nil
             Moods.askedAtMs[uid] = now
         end
     end
@@ -80,9 +97,10 @@ function Moods.tick(now)
             Moods.stats.failed = Moods.stats.failed + 1
             return
         end
-        local at = d.hooks.nowMs()
+        local at, Dialogue = d.hooks.nowMs(), ALifeBrain.Dialogue
         for _, mood in ipairs(data.moods) do
-            if type(mood) == "table" and ALifeBrain.Dialogue.learnMood(mood.uid, mood, at) then
+            local apply = type(mood) == "table" and refreshed[mood.uid] and Dialogue.updateMood or Dialogue.learnMood
+            if type(mood) == "table" and apply(mood.uid, mood, at) then
                 Moods.stats.filled = Moods.stats.filled + 1
             end
         end

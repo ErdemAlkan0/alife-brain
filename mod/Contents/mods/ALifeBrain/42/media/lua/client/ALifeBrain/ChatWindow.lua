@@ -322,9 +322,12 @@ function Window:prerender()
         self:drawText(stance, x, 84, 0.66, 0.59, 0.39, 1, UIFont.Small)
     end
     if self.trust ~= nil then
+        -- The mind is fresher: a trade or gift moves trust after the reply (Moods.refresh).
         local mind = Dialogue.minds[self.uid]
         local goal = mind ~= nil and Dialogue.goalNow(mind, nowMs()) or (self.goal or 0)
-        local mood = T.get("mood", { trust = self.trust, fear = self.fear or 0, goal = math.floor(goal + 0.5) })
+        local trust = mind ~= nil and mind.trust or self.trust
+        local fear = mind ~= nil and mind.fear or self.fear or 0
+        local mood = T.get("mood", { trust = trust, fear = fear, goal = math.floor(goal + 0.5) })
         local width = getTextManager():MeasureStringX(UIFont.Small, mood)
         self:drawText(mood, self.chatWidth - 16 - width, self.headerHeight > 100 and 84 or 58, 0.66, 0.59, 0.39, 1, UIFont.Small)
     end
@@ -429,7 +432,7 @@ function Window:sendText(text)
     if self.closed or self.thinkingSince ~= nil then return false end
     local player, record = self.player, Hooks.readRecord(self.uid)
     local vars = { name = plain(self.npcName) }
-    local options = self.parley and { standoff = true } or nil
+    local options = self.parley and { standoff = true, feud = self.feud } or nil
     local id, reason = Dialogue.ask(player, record, self.shell, text, self, self.trade, options)
     if id == nil then
         if reason == "offline" then self:say("offline")
@@ -452,7 +455,7 @@ Chat.PARLEY_OPENING = "(The stranger has just walked into your sights. You call 
 function Window:sendOpening()
     if self.closed then return false end
     local id = Dialogue.ask(self.player, Hooks.readRecord(self.uid), self.shell, Chat.PARLEY_OPENING, self, self.trade,
-        { standoff = true, opening = true })
+        { standoff = true, opening = true, feud = self.feud })
     if id == nil then return false end
     self:setThinking(true)
     return true
@@ -789,7 +792,7 @@ function Chat.openParley(parley)
     local info = Hooks.describe(parley.shell) or {}
     local window = Chat.open(parley.player, { uid = parley.uid, shell = parley.shell, record = record, name = info.name,
         factionName = info.factionName })
-    window.parley = true
+    window.parley, window.feud = true, parley.feud == true
     window:say("parley_start", { name = plain(window.npcName) })
     window:sendOpening()
     return window

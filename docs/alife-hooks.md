@@ -235,7 +235,14 @@ Diğer:
   `spawnStance` → `Reputation.recordedStatus` (fraksiyon başına kayıtlı durum) → aktör `memory` geçersiz kılmaları.
 - `Relations.status(sourceActor, targetActor)` → NPC↔NPC ilişki.
 - `Reputation` (`ModData "ProjectALife.Reputation.v1"`): `escalate(player, actor, "attack"|"kill"|"provoked")`;
-  `provoked` 24 oyun saati sonra unutulur.
+  `provoked` 24 oyun saati sonra unutulur. Taban tutumu temkinli ya da tarafsız bir fraksiyonun **bir** üyesine vurmak
+  ya da onu öldürmek bütün fraksiyonu oyuncuya kalıcı olarak düşman yapar (`cause = "attack"`, unutulmaz; taban düşman
+  fraksiyonlarda değişmez). `Careful.onHitByPlayer` zaten düşman olan bir ekibe `hostileToPlayerKeys` yazmaz.
+  **Uygulandı (2026-10-14):** `Hooks.parleyBlocked` yalnızca grubun kendi kinini (`hostileToPlayerKeys`) "grudge"
+  sayar; yalnızca fraksiyon itibarından düşman olan ekip pazarlık eder (`feud`, prompt'a `FEUD_RULE`). Oyun testinde
+  26 ekipten 17'si itibar yüzünden tek söz etmeden ateş açmıştı. Görüş: `Talk.lineOfSight` ya da A-Life'ın uyarı
+  görüşü `ModuleCareful.lineOfSight`; ikisi de görmüyorsa NPC 8 s bekler (`Parley.settings.sightWaitMs`). Oyuncunun son
+  2 dk içinde vurduğu grup pazarlık etmez (`Parley.attackedAtMs`).
 
 LLM `trust_delta` / `fear_delta` → A-Life'ta zaten var olan kollar (sınırlı, geri alınabilir olanlar tercih):
 

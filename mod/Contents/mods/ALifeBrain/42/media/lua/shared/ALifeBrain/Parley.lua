@@ -30,7 +30,14 @@ local Parley = {
         leaveTruceMs = 180000, -- sent away: this long to get going
         tributeTruceMs = 900000, -- paid: left alone this long
         cooldownMs = 600000, -- the same crew and player parley at most once in this long
+        -- A-Life may notice the player before there is a clear line between them (a fence, a
+        -- corner): the NPC waits this long for sight instead of opening fire unseen (play test,
+        -- 2026-10-12: 3 of 26 crews).
+        sightWaitMs = 8000,
+        attackedMs = 120000, -- a crew the player hit no longer than this ago shoots
     },
+    unseenSince = {}, -- uid -> since when it has waited to see the player
+    attackedAtMs = {}, -- group key -> when the player last hit one of them
     active = nil,
     cooldowns = {},
     stats = { started = 0, paid = 0, sentAway = 0, fights = 0, gotAway = 0 },
@@ -87,7 +94,15 @@ function Parley.consider(actor, shell, player, now)
     local groupKey = d.hooks.groupKey(actor)
     local playerKey = d.hooks.reputationKey(player)
     if (Parley.cooldowns[cooldownKey(groupKey, playerKey)] or 0) > now then return nil end
-    local blocked = d.hooks.parleyBlocked(actor, shell, player, now, Parley.settings.noticeTiles)
+    local blocked, feud = d.hooks.parleyBlocked(actor, shell, player, now, Parley.settings.noticeTiles)
+    if (Parley.attackedAtMs[groupKey] or -math.huge) > now - Parley.settings.attackedMs then blocked = "attacked" end
+    if blocked == "unseen" then
+        local since = Parley.unseenSince[actor.uid]
+        if since == nil then since, Parley.unseenSince[actor.uid] = now, now end
+        if now - since < Parley.settings.sightWaitMs then return "hold" end
+    else
+        Parley.unseenSince[actor.uid] = nil
+    end
     if blocked ~= nil then
         Parley.lastNote = blocked
         if Parley.noted[actor.uid] ~= blocked then
@@ -96,19 +111,22 @@ function Parley.consider(actor, shell, player, now)
         end
         return nil
     end
-    Parley.start(actor, shell, player, now, groupKey, playerKey)
+    Parley.start(actor, shell, player, now, groupKey, playerKey, feud)
     return "hold"
 end
 
-function Parley.start(actor, shell, player, now, groupKey, playerKey)
+-- feud: the crew's faction counts the player as an enemy (Hooks.parleyBlocked); the LLM is told.
+function Parley.start(actor, shell, player, now, groupKey, playerKey, feud)
     local d = deps()
     local parley = { uid = actor.uid, shell = shell, player = player, playerKey = playerKey, groupKey = groupKey,
-        crew = d.hooks.crewOf(actor, shell, Parley.settings.crewTiles), startedMs = now, heardMs = now, renewedMs = 0 }
+        crew = d.hooks.crewOf(actor, shell, Parley.settings.crewTiles), startedMs = now, heardMs = now, renewedMs = 0,
+        feud = feud == true }
     Parley.active = parley
     Parley.stats.started = Parley.stats.started + 1
     local size = 0
     for _ in pairs(parley.crew) do size = size + 1 end
-    note(d, "parley: " .. tostring(actor.uid) .. " calls out (crew of " .. tostring(size) .. ")")
+    note(d, "parley: " .. tostring(actor.uid) .. " calls out (crew of " .. tostring(size) .. ")"
+        .. (parley.feud and "; its faction holds a grudge" or ""))
     Parley.renew(now)
     d.hooks.voice(shell, "CAREFUL_KEEP_BACK")
     if type(Parley.onOpen) == "function" then pcall(Parley.onOpen, parley) end
@@ -211,10 +229,24 @@ function Parley.onWindowClosed(uid, now)
     return nil
 end
 
--- The player hit someone (EventLog): one of the crew means the talking is over.
+-- The player hit an NPC (EventLog): one of the crew means the talking is over, and that NPC's
+-- group shoots rather than talks for a while (A-Life does not mark an already hostile crew).
 function Parley.onPlayerAttack(uid, now)
+    local record = deps().hooks.readRecord(uid)
+    Parley.attackedAtMs[record ~= nil and deps().hooks.groupKey(record) or ("solo:" .. tostring(uid))] = now
+    Parley.unseenSince[uid] = nil
     if Parley.active ~= nil and Parley.active.crew[uid] then return Parley.fight("attacked", now) end
     return nil
+end
+
+-- Drops what it remembers about attacks and waiting (called now and then).
+function Parley.forget(now)
+    for key, at in pairs(Parley.attackedAtMs) do
+        if now - at > Parley.settings.attackedMs then Parley.attackedAtMs[key] = nil end
+    end
+    for uid, since in pairs(Parley.unseenSince) do
+        if now - since > Parley.settings.sightWaitMs * 4 then Parley.unseenSince[uid] = nil end
+    end
 end
 
 return Parley

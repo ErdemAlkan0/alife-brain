@@ -62,21 +62,57 @@ function Tests.suite(name, cases)
     Tests.suites[#Tests.suites + 1] = { name = name, cases = cases }
 end
 
+-- Saves the named fields of target, runs body() and puts every one back, nil ones included.
+-- The tests run in the live game (at startup with -debug): a loop over pairs(saved) skips the
+-- nils, and the fakes it should have removed stayed installed (Rapport never saw a real NPC,
+-- policy control stayed off; play test, 2026-10-14).
+function Tests.keeping(target, fields, body)
+    local saved = {}
+    for index, field in ipairs(fields) do saved[index] = target[field] end
+    local ok, failure = pcall(body)
+    for index, field in ipairs(fields) do target[field] = saved[index] end
+    if not ok then error(failure, 0) end
+end
+
+-- Fields where tests install fakes. Whatever a test run leaves changed fails the run and is put back.
+Tests.LIVE_FIELDS = { "override", "forced" }
+
+local function liveFields()
+    local snapshot = {}
+    for name, module in pairs(ALifeBrain) do
+        if type(module) == "table" and module ~= Tests then
+            for _, field in ipairs(Tests.LIVE_FIELDS) do
+                snapshot[#snapshot + 1] = { module = module, name = name, field = field, value = rawget(module, field) }
+            end
+        end
+    end
+    return snapshot
+end
+
 -- Returns { passed, failed, failures = { "suite > case: error" } }.
 function Tests.runAll(printer)
     printer = printer or print
     local result = { passed = 0, failed = 0, failures = {} }
+    local function fail(line)
+        result.failed = result.failed + 1
+        result.failures[#result.failures + 1] = line
+        printer("[test] FAIL " .. line)
+    end
+    local live = liveFields()
     for _, suite in ipairs(Tests.suites) do
         for _, case in ipairs(suite.cases) do
             local ok, err = pcall(case[2], check)
             if ok then
                 result.passed = result.passed + 1
             else
-                result.failed = result.failed + 1
-                local line = suite.name .. " > " .. case[1] .. ": " .. tostring(err)
-                result.failures[#result.failures + 1] = line
-                printer("[test] FAIL " .. line)
+                fail(suite.name .. " > " .. case[1] .. ": " .. tostring(err))
             end
+        end
+    end
+    for _, entry in ipairs(live) do
+        if rawget(entry.module, entry.field) ~= entry.value then
+            entry.module[entry.field] = entry.value
+            fail("test isolation: ALifeBrain." .. entry.name .. "." .. entry.field .. " was left changed (put back)")
         end
     end
     printer("[test] " .. tostring(result.passed) .. " passed, " .. tostring(result.failed) .. " failed"

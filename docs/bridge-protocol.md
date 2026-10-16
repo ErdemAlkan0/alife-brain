@@ -67,8 +67,10 @@ Cevap `data`: `{"say": "...", "intent": "none|give|follow|stay|leave|trade|warn|
 cevapta `goal_delta` ile en çok ±25 oynatır, 30 dakikalık yarı ömürle 0'a söner (`memory.GOAL_HALF_LIFE_MS` =
 `Dialogue.GOAL_HALF_LIFE_MS`; değer cevap anındaki hâlidir, oyun kendi saatiyle söndürmeye devam eder).
 
-İstekte `world.language` oyunun dil kodudur (`TR`, `EN` ...). Pazarlıkta (`Parley.lua`) `standoff: {"opening": bool}`
-gelir: NPC düşmandır ve oyuncuyu ateş etmeden durdurmuştur. `opening = true` ise NPC ilk konuşur; `text` oyuncunun
+İstekte `world.language` oyunun dil kodudur (`TR`, `EN` ...). Pazarlıkta (`Parley.lua`) `standoff: {"opening": bool,
+"feud": bool}` gelir: NPC düşmandır ve oyuncuyu ateş etmeden durdurmuştur. `feud = true`: ekip yalnızca fraksiyonu
+oyuncuyu başka gruplarına yaptıkları yüzünden düşman saydığı için düşmandır (A-Life itibarı); prompt öfkeli ama önce
+konuşan bir ekip tarif eder. `opening = true` ise NPC ilk konuşur; `text` oyuncunun
 sözü değil bir anlatımdır (hafızaya oyuncu satırı olarak yazılmaz, prompt'a dil adıyla eklenir). Pazarlıkta
 `intent attack` çatışmayı, `intent leave` oyuncuyu bırakmayı başlatır; haraç `trade` (`decision: counter`,
 `npcWants`, boş `npcOffer`) ile istenir.
@@ -105,7 +107,10 @@ Policy'nin girdisi için, bu oturumda konuşulmamış NPC'lerin kayıtlı ruh ha
 istek gönderir). Cevap: `{"moods": [{"uid", "trust", "fear", "goal"}], "goalHalfLifeMs": 1800000}`; yalnızca
 sidecar'da bir şeyi kayıtlı NPC'ler listelenir (gerisi 0'dan başlar; oyun onları 5 dakika sonra yeniden sorar).
 Oyun bunları yalnızca elinde olmayan NPC'ler için `Dialogue.minds`'a yazar; bu oturumdaki bir cevap her zaman daha
-yenidir.
+yenidir. İstisna: oyuncunun bir olayı sidecar'da güveni ya da korkuyu değiştirdiyse (`npc_hit`, `player_helped`,
+`robbed_player` ekibi, başarılı `npc_action` trade/give) oyun o NPC'yi bilse de yeniden sorar (`Moods.refresh`) ve
+cevabı güven/korku/atılganlığın yerine yazar (`Dialogue.updateMood`, son niyet kalır). Olay satırı istekten önce
+yazıldığı için sidecar onu önce uygular.
 
 ### `decision_samples` (3. aşama, davranış klonlama verisi)
 
